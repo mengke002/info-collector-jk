@@ -13,6 +13,7 @@ from src.logger import setup_logging
 from src.database import DatabaseManager
 from src.config import config
 from src.tasks import run_crawl_task, run_cleanup_task, run_stats_task
+from src.tasks import run_report_task
 
 # Initialize logging
 logging_config = config.get_logging_config()
@@ -29,8 +30,8 @@ def get_beijing_time():
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='即刻爬虫系统')
-    parser.add_argument('--task', choices=['crawl', 'cleanup', 'stats', 'full'],
+    parser = argparse.ArgumentParser(description='即刻爬虫系统 + 报告生成')
+    parser.add_argument('--task', choices=['crawl', 'cleanup', 'stats', 'report', 'full'],
                        default='crawl', help='要执行的任务类型')
     parser.add_argument('--retention-days', type=int, 
                        help='数据保留天数（仅用于cleanup任务）')
@@ -38,6 +39,12 @@ def main():
                        help='输出格式')
     parser.add_argument('--recreate-db', action='store_true',
                        help='删除并重新创建所有表')
+    # 报告任务参数
+    parser.add_argument('--report-type', choices=['daily_hotspot','weekly_digest','kol_trajectory','quarterly_narrative'],
+                       help='报告类型（用于 --task report）')
+    parser.add_argument('--hours-back', type=int, help='回溯小时数（用于daily）')
+    parser.add_argument('--days-back', type=int, help='回溯天数（用于weekly/quarterly/kol）')
+    parser.add_argument('--kol-user-ids', type=str, help='KOL用户ID列表，逗号分隔（用于kol_trajectory）')
     
     args = parser.parse_args()
     
@@ -61,6 +68,19 @@ def main():
         result = run_cleanup_task(args.retention_days)
     elif args.task == 'stats':
         result = run_stats_task()
+    elif args.task == 'report':
+        if not args.report_type:
+            print('缺少 --report-type 参数')
+            sys.exit(1)
+        kol_ids = None
+        if args.kol_user_ids:
+            kol_ids = [i.strip() for i in args.kol_user_ids.split(',') if i.strip()]
+        result = run_report_task(
+            report_type=args.report_type,
+            hours_back=args.hours_back,
+            days_back=args.days_back,
+            kol_user_ids=kol_ids,
+        )
     elif args.task == 'full':
         result = run_full_task()
     else:
@@ -158,6 +178,16 @@ def print_result(result: dict, task_type: str):
         cleanup_result = result.get('results', {}).get('cleanup', {})
         if cleanup_result.get('success'):
             print(f"   清理: 删除 {cleanup_result.get('deleted_count', 0)} 条旧记录")
+    
+    elif task_type == 'report':
+        print(f"✅ 报告任务完成")
+        if 'report_id' in result:
+            print(f"   报告ID: {result.get('report_id')}，分析条目: {result.get('items_analyzed', 0)}")
+            if result.get('title'):
+                print(f"   标题: {result.get('title')}")
+        else:
+            # 可能是批量KOL报告
+            print(f"   生成报告: {result.get('generated', 0)} 个，失败: {result.get('failed', 0)} 个")
 
 
 if __name__ == "__main__":

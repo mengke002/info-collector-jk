@@ -109,6 +109,25 @@ class DatabaseManager:
                 COMMENT='即刻用户动态'
                 """
             ),
+            'jk_reports': (
+                """
+                CREATE TABLE IF NOT EXISTS jk_reports (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    report_type ENUM('daily_hotspot','weekly_digest','kol_trajectory','quarterly_narrative') NOT NULL,
+                    scope VARCHAR(128) DEFAULT NULL COMMENT '如kol为用户ID或昵称，其他为global',
+                    analysis_period_start DATETIME NOT NULL,
+                    analysis_period_end DATETIME NOT NULL,
+                    items_analyzed INT UNSIGNED DEFAULT 0,
+                    report_title VARCHAR(200) NOT NULL,
+                    report_content MEDIUMTEXT NOT NULL,
+                    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_type_time (report_type, generated_at),
+                    INDEX idx_period (analysis_period_start, analysis_period_end),
+                    INDEX idx_scope (scope)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='即刻分析报告'
+                """
+            ),
         }
 
     def upsert_profiles(self, profiles: Sequence[Dict[str, Any]]) -> int:
@@ -247,3 +266,56 @@ class DatabaseManager:
                 """, (days,))
                 return cur.fetchall()
 
+    def get_recent_posts(self, hours_back: int = 24, limit: int = 1500) -> List[Dict[str, Any]]:
+        """获取最近hours_back小时内新增的帖子"""
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
+                           prof.nickname, prof.jike_user_id
+                    FROM jk_posts p
+                    JOIN jk_profiles prof ON p.profile_id = prof.id
+                    WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL %s HOUR)
+                    ORDER BY p.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    (hours_back,)
+                )
+                return cur.fetchall()
+
+    def get_user_posts_for_analysis(self, jike_user_id: str, days: int = 30, limit: int = 2000) -> List[Dict[str, Any]]:
+        """获取指定用户在指定天数内的帖子用于分析"""
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute(
+                    f"""
+                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
+                           prof.nickname, prof.jike_user_id
+                    FROM jk_posts p
+                    JOIN jk_profiles prof ON p.profile_id = prof.id
+                    WHERE prof.jike_user_id = %s
+                      AND p.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                    ORDER BY p.created_at DESC
+                    LIMIT {limit}
+                    """,
+                    (jike_user_id, days)
+                )
+                return cur.fetchall()
+
+    def save_report(self, report_data: Dict[str, Any]) -> int:
+        """保存分析报告到jk_reports表"""
+        sql = """
+        INSERT INTO jk_reports (
+            report_type, scope, analysis_period_start, analysis_period_end,
+            items_analyzed, report_title, report_content
+        ) VALUES (
+            %(report_type)s, %(scope)s, %(analysis_period_start)s, %(analysis_period_end)s,
+            %(items_analyzed)s, %(report_title)s, %(report_content)s
+        )
+        """
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, report_data)
+                conn.commit()
+                return cur.lastrowid

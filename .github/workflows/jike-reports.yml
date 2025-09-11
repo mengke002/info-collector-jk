@@ -1,0 +1,171 @@
+name: Jike Report Generation
+
+on:
+  schedule:
+    # 北京时间 8:00、14:00、18:00、21:00 生成 24h 日报（UTC: 0,6,10,13）
+    - cron: '0 0,6,10,13 * * *'
+    # 每周日 北京时间 08:00 生成周报（UTC: 0）
+    - cron: '0 0 * * 0'
+    # 每月1日 北京时间 08:00 生成KOL月报（UTC: 0）
+    - cron: '0 0 1 * *'
+    # 每季度首月1日 北京时间 08:00 生成季度叙事（UTC: 0）
+    - cron: '0 0 1 1,4,7,10 *'
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: '手动运行的报告类型'
+        required: true
+        default: 'daily_hotspot'
+        type: choice
+        options:
+        - daily_hotspot
+        - weekly_digest
+        - kol_trajectory
+        - quarterly_narrative
+      hours_back:
+        description: '回溯小时（仅用于daily）'
+        required: false
+        default: '24'
+      days_back:
+        description: '回溯天数（weekly/quarterly/kol）'
+        required: false
+        default: '0'
+      kol_user_ids:
+        description: 'KOL用户ID（逗号分隔）仅kol_trajectory使用'
+        required: false
+        default: ''
+
+jobs:
+  report-daily:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0,6,10,13 * * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'daily_hotspot')
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSL_MODE: ${{ secrets.DB_SSL_MODE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Generate daily hotspot report
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then \
+          python main.py --task report --report-type daily_hotspot --hours-back ${{ github.event.inputs.hours_back }}; \
+        else \
+          python main.py --task report --report-type daily_hotspot; \
+        fi
+
+  report-weekly:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0 * * 0' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'weekly_digest')
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSL_MODE: ${{ secrets.DB_SSL_MODE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Generate weekly digest report
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.days_back }}" != "0" ]; then \
+          python main.py --task report --report-type weekly_digest --days-back ${{ github.event.inputs.days_back }}; \
+        else \
+          python main.py --task report --report-type weekly_digest; \
+        fi
+
+  report-kol:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0 1 * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'kol_trajectory')
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSL_MODE: ${{ secrets.DB_SSL_MODE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      ANALYSIS_KOL_USER_IDS: ${{ secrets.ANALYSIS_KOL_USER_IDS }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Generate KOL monthly trajectory reports
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.kol_user_ids }}" ]; then \
+          python main.py --task report --report-type kol_trajectory --days-back ${{ github.event.inputs.days_back }} --kol-user-ids "${{ github.event.inputs.kol_user_ids }}"; \
+        else \
+          python main.py --task report --report-type kol_trajectory --days-back 30; \
+        fi
+
+  report-quarterly:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 0 1 1,4,7,10 *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'quarterly_narrative')
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_SSL_MODE: ${{ secrets.DB_SSL_MODE }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+      LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Generate quarterly narrative report
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.days_back }}" != "0" ]; then \
+          python main.py --task report --report-type quarterly_narrative --days-back ${{ github.event.inputs.days_back }}; \
+        else \
+          python main.py --task report --report-type quarterly_narrative; \
+        fi
+

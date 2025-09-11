@@ -137,5 +137,28 @@ class Config:
         """获取并行工作线程数"""
         return self._get_config_value('executor', 'max_workers', 'EXECUTOR_MAX_WORKERS', 10, int)
 
+    def get_llm_config(self) -> Dict[str, Any]:
+        """获取LLM配置，优先级：环境变量 > config.ini > 默认值。
+        与 info-collector-linuxdo 保持一致字段。
+        """
+        return {
+            'openai_api_key': self._get_config_value('llm', 'openai_api_key', 'OPENAI_API_KEY', None),
+            'openai_model': self._get_config_value('llm', 'openai_model', 'OPENAI_MODEL', 'gpt-3.5-turbo'),
+            'openai_base_url': self._get_config_value('llm', 'openai_base_url', 'OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+            'max_content_length': self._get_config_value('llm', 'max_content_length', 'LLM_MAX_CONTENT_LENGTH', 380000, int)
+        }
+
+    def get_analysis_config(self) -> Dict[str, Any]:
+        """获取分析任务配置（报告时间窗口、KOL名单等）"""
+        kol_ids_raw = self._get_config_value('analysis', 'kol_user_ids', 'ANALYSIS_KOL_USER_IDS', '', str) or ''
+        kol_ids = [i.strip() for i in kol_ids_raw.split(',') if i.strip()]
+        return {
+            'hours_back_daily': self._get_config_value('analysis', 'hours_back_daily', 'ANALYSIS_HOURS_BACK_DAILY', 24, int),
+            'days_back_weekly': self._get_config_value('analysis', 'days_back_weekly', 'ANALYSIS_DAYS_BACK_WEEKLY', 7, int),
+            'days_back_quarterly': self._get_config_value('analysis', 'days_back_quarterly', 'ANALYSIS_DAYS_BACK_QUARTERLY', 90, int),
+            'days_back_kol': self._get_config_value('analysis', 'days_back_kol', 'ANALYSIS_DAYS_BACK_KOL', 30, int),
+            'kol_user_ids': kol_ids
+        }
+
 # 全局配置实例
 config = Config()

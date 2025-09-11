@@ -4,7 +4,7 @@ Task wrapper to run Jike collection and management tasks.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 try:
     from .crawler import run as run_crawler
@@ -15,6 +15,14 @@ except ImportError:
     from crawler import run as run_crawler  # type: ignore
     from database import DatabaseManager  # type: ignore
     from config import config  # type: ignore
+    
+# 按需导入报告生成器，避免无关任务触发其模块编译
+def _lazy_get_report_generator():
+    try:
+        from .report_generator import get_report_generator as _gr
+    except ImportError:  # pragma: no cover
+        from report_generator import get_report_generator as _gr  # type: ignore
+    return _gr()
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +90,61 @@ def run_stats_task() -> Dict[str, Any]:
         }
 
 
+def run_report_task(report_type: str,
+                    hours_back: Optional[int] = None,
+                    days_back: Optional[int] = None,
+                    kol_user_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """执行报告生成任务
+    report_type: daily_hotspot | weekly_digest | kol_trajectory | quarterly_narrative
+    """
+    logger.info(f"开始执行报告任务: {report_type}")
+    try:
+        # 初始化数据库（确保表存在）
+        _ = DatabaseManager(config)
+        rg = get_report_generator()
+        if report_type == 'daily_hotspot':
+            return rg.generate_daily_hotspot(hours_back=hours_back)
+        elif report_type == 'weekly_digest':
+            return rg.generate_weekly_digest(days_back=days_back)
+        elif report_type == 'kol_trajectory':
+            return rg.generate_kol_trajectory(kol_ids=kol_user_ids, days_back=days_back)
+        elif report_type == 'quarterly_narrative':
+            return rg.generate_quarterly_narrative(days_back=days_back)
+        else:
+            return {'success': False, 'error': f'未知报告类型: {report_type}'}
+    except Exception as e:
+        logger.error(f"报告任务失败: {e}", exc_info=True)
+        return {'success': False, 'error': str(e)}
+
+
+def run_report_task(report_type: str,
+                    hours_back: Optional[int] = None,
+                    days_back: Optional[int] = None,
+                    kol_user_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """执行报告生成任务
+    report_type: daily_hotspot | weekly_digest | kol_trajectory | quarterly_narrative
+    """
+    logger.info(f"开始执行报告任务: {report_type}")
+    try:
+        # 初始化数据库（确保表存在）
+        _ = DatabaseManager(config)
+        # 延迟导入，避免在非报告类任务执行时编译 report_generator
+        rg = _lazy_get_report_generator()
+        if report_type == 'daily_hotspot':
+            return rg.generate_daily_hotspot(hours_back=hours_back)
+        elif report_type == 'weekly_digest':
+            return rg.generate_weekly_digest(days_back=days_back)
+        elif report_type == 'kol_trajectory':
+            return rg.generate_kol_trajectory(kol_ids=kol_user_ids, days_back=days_back)
+        elif report_type == 'quarterly_narrative':
+            return rg.generate_quarterly_narrative(days_back=days_back)
+        else:
+            return {'success': False, 'error': f'未知报告类型: {report_type}'}
+    except Exception as e:
+        logger.error(f"报告任务失败: {e}", exc_info=True)
+        return {'success': False, 'error': str(e)}
+
+
 if __name__ == '__main__':
     import sys
     logging.basicConfig(
@@ -97,4 +160,3 @@ if __name__ == '__main__':
     print("\n=== 统计任务测试 ===")
     stats_result = run_stats_task()
     print(f"统计结果: {stats_result}")
-
