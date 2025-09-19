@@ -51,6 +51,46 @@ class JKReportGenerator:
                 return t[:pos + 1] + "\n..."
         return t + "\n..."
 
+    def _clean_llm_output_for_notion(self, llm_output: str) -> str:
+        """清理LLM输出内容，确保Notion兼容性"""
+        if not llm_output:
+            return ""
+
+        # 保护Source引用格式，不要替换其中的方括号
+        import re
+
+        # 先提取所有Source引用
+        source_pattern = r'\[Sources?:\s*[T\d\s,]+\]'
+        sources = re.findall(source_pattern, llm_output)
+
+        # 临时替换Source引用为占位符
+        temp_llm_output = llm_output
+        source_placeholders = {}
+        for i, source in enumerate(sources):
+            placeholder = f"__SOURCE_PLACEHOLDER_{i}__"
+            source_placeholders[placeholder] = source
+            temp_llm_output = temp_llm_output.replace(source, placeholder)
+
+        # 替换其他可能导致Markdown链接冲突的方括号
+        cleaned = temp_llm_output.replace('[', '【').replace(']', '】')
+
+        # 恢复Source引用
+        for placeholder, original_source in source_placeholders.items():
+            cleaned = cleaned.replace(placeholder, original_source)
+
+        # 确保行尾有适当的空格用于换行
+        lines = cleaned.split('\n')
+        processed_lines = []
+
+        for line in lines:
+            # 对于以*开头的斜体行，在行尾添加空格以确保换行
+            if line.strip().startswith('*') and line.strip().endswith('*'):
+                processed_lines.append(line.rstrip() + '  ')
+            else:
+                processed_lines.append(line)
+
+        return '\n'.join(processed_lines)
+
     def _format_posts_for_llm(self, posts: List[Dict[str, Any]], source_prefix: str = 'T') -> Tuple[str, List[Dict[str, Any]]]:
         """将帖子格式化为带编号的Markdown文本,返回(文本, 源映射列表)"""
         lines: List[str] = []
@@ -95,9 +135,11 @@ class JKReportGenerator:
         return "\n".join(lines), sources
 
     def _render_sources_section(self, sources: List[Dict[str, Any]]) -> str:
-        lines = ["## 来源清单 (Source List)", ""]
+        lines = ["## 📚 来源清单 (Source List)", ""]
         for s in sources:
-            lines.append(f"- **[{s['sid']}]**: [@{s['nickname']}]({s['link']}): {s['title'] or s['excerpt']}")
+            # 清理标题中的方括号，避免与Markdown链接冲突
+            clean_title = (s['title'] or s['excerpt']).replace('[', '【').replace(']', '】')
+            lines.append(f"- **【{s['sid']}】**: [@{s['nickname']}]({s['link']}): {clean_title}")
         return "\n".join(lines)
 
     # ---------- Prompt 模板 ----------
@@ -248,7 +290,25 @@ class JKReportGenerator:
             header = "# 即刻24小时热点追踪器 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
-            report_content = llm_output + "\n\n" + self._render_sources_section(sources)
+            # 为LLM生成的报告添加标准头部信息
+            beijing_time = self._bj_time()
+            header_info = [
+                f"# 📈 即刻24小时热点追踪器",
+                "",
+                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*分析动态数: {len(posts)} 条*",
+                "",
+                "---",
+                ""
+            ]
+
+            # 清理LLM输出中可能的格式问题
+            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
 
         title = f"即刻24h热点观察 - {end_time.strftime('%Y-%m-%d %H:%M')}"
         report_row = {
@@ -261,12 +321,53 @@ class JKReportGenerator:
             'report_content': report_content,
         }
         report_id = self.db.save_report(report_row)
-        return {
+
+        result = {
             'success': True,
             'report_id': report_id,
             'items_analyzed': len(posts),
             'title': title,
         }
+
+        # 尝试推送到Notion
+        try:
+            from .notion_client import jike_notion_client
+
+            # 格式化Notion标题
+            beijing_time = self._bj_time()
+            time_str = beijing_time.strftime('%H:%M')
+            notion_title = f"[{time_str}] 即刻24h热点观察 ({len(posts)}条动态)"
+
+            self.logger.info(f"开始推送日报到Notion: {notion_title}")
+
+            notion_result = jike_notion_client.create_report_page(
+                report_title=notion_title,
+                report_content=report_content,
+                report_date=beijing_time
+            )
+
+            if notion_result.get('success'):
+                self.logger.info(f"日报成功推送到Notion: {notion_result.get('page_url')}")
+                result['notion_push'] = {
+                    'success': True,
+                    'page_url': notion_result.get('page_url'),
+                    'path': notion_result.get('path')
+                }
+            else:
+                self.logger.warning(f"推送日报到Notion失败: {notion_result.get('error')}")
+                result['notion_push'] = {
+                    'success': False,
+                    'error': notion_result.get('error')
+                }
+
+        except Exception as e:
+            self.logger.warning(f"推送日报到Notion时出错: {e}")
+            result['notion_push'] = {
+                'success': False,
+                'error': str(e)
+            }
+
+        return result
 
     def generate_weekly_digest(self, days_back: Optional[int] = None) -> Dict[str, Any]:
         days = int(days_back or self.analysis_cfg.get('days_back_weekly', 7))
@@ -283,7 +384,25 @@ class JKReportGenerator:
             header = "# 即刻周度社群洞察 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
-            report_content = llm_output + "\n\n" + self._render_sources_section(sources)
+            # 为LLM生成的报告添加标准头部信息
+            beijing_time = self._bj_time()
+            header_info = [
+                f"# 📊 即刻周度社群洞察",
+                "",
+                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*分析动态数: {len(posts)} 条*",
+                "",
+                "---",
+                ""
+            ]
+
+            # 清理LLM输出中可能的格式问题
+            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
 
         title = f"即刻周度社群洞察 - 截止 {end_time.strftime('%Y-%m-%d')}"
         report_row = {
@@ -296,12 +415,52 @@ class JKReportGenerator:
             'report_content': report_content,
         }
         report_id = self.db.save_report(report_row)
-        return {
+
+        result = {
             'success': True,
             'report_id': report_id,
             'items_analyzed': len(posts),
             'title': title,
         }
+
+        # 尝试推送到Notion
+        try:
+            from .notion_client import jike_notion_client
+
+            # 格式化Notion标题
+            beijing_time = self._bj_time()
+            notion_title = f"即刻周度社群洞察 - {beijing_time.strftime('%Y%m%d')} ({len(posts)}条动态)"
+
+            self.logger.info(f"开始推送周报到Notion: {notion_title}")
+
+            notion_result = jike_notion_client.create_report_page(
+                report_title=notion_title,
+                report_content=report_content,
+                report_date=beijing_time
+            )
+
+            if notion_result.get('success'):
+                self.logger.info(f"周报成功推送到Notion: {notion_result.get('page_url')}")
+                result['notion_push'] = {
+                    'success': True,
+                    'page_url': notion_result.get('page_url'),
+                    'path': notion_result.get('path')
+                }
+            else:
+                self.logger.warning(f"推送周报到Notion失败: {notion_result.get('error')}")
+                result['notion_push'] = {
+                    'success': False,
+                    'error': notion_result.get('error')
+                }
+
+        except Exception as e:
+            self.logger.warning(f"推送周报到Notion时出错: {e}")
+            result['notion_push'] = {
+                'success': False,
+                'error': str(e)
+            }
+
+        return result
 
     def generate_quarterly_narrative(self, days_back: Optional[int] = None) -> Dict[str, Any]:
         days = int(days_back or self.analysis_cfg.get('days_back_quarterly', 90))
@@ -319,7 +478,26 @@ class JKReportGenerator:
             header = "# 即刻季度战略叙事 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
-            report_content = llm_output + "\n\n" + self._render_sources_section(sources)
+            # 为LLM生成的报告添加标准头部信息
+            beijing_time = self._bj_time()
+            q = (end_time.month - 1) // 3 + 1
+            header_info = [
+                f"# 🚀 即刻季度战略叙事 - {end_time.year} Q{q}",
+                "",
+                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                "",
+                f"*分析动态数: {len(posts)} 条*",
+                "",
+                "---",
+                ""
+            ]
+
+            # 清理LLM输出中可能的格式问题
+            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
 
         # 简单季度标题
         q = (end_time.month - 1) // 3 + 1
@@ -334,12 +512,52 @@ class JKReportGenerator:
             'report_content': report_content,
         }
         report_id = self.db.save_report(report_row)
-        return {
+
+        result = {
             'success': True,
             'report_id': report_id,
             'items_analyzed': len(posts),
             'title': title,
         }
+
+        # 尝试推送到Notion
+        try:
+            from .notion_client import jike_notion_client
+
+            # 格式化Notion标题
+            beijing_time = self._bj_time()
+            notion_title = f"即刻季度战略叙事 - {end_time.year}Q{q} ({len(posts)}条动态)"
+
+            self.logger.info(f"开始推送季报到Notion: {notion_title}")
+
+            notion_result = jike_notion_client.create_report_page(
+                report_title=notion_title,
+                report_content=report_content,
+                report_date=beijing_time
+            )
+
+            if notion_result.get('success'):
+                self.logger.info(f"季报成功推送到Notion: {notion_result.get('page_url')}")
+                result['notion_push'] = {
+                    'success': True,
+                    'page_url': notion_result.get('page_url'),
+                    'path': notion_result.get('path')
+                }
+            else:
+                self.logger.warning(f"推送季报到Notion失败: {notion_result.get('error')}")
+                result['notion_push'] = {
+                    'success': False,
+                    'error': notion_result.get('error')
+                }
+
+        except Exception as e:
+            self.logger.warning(f"推送季报到Notion时出错: {e}")
+            result['notion_push'] = {
+                'success': False,
+                'error': str(e)
+            }
+
+        return result
 
     def generate_kol_trajectory(self, kol_ids: Optional[List[str]] = None, days_back: Optional[int] = None) -> Dict[str, Any]:
         """为多个KOL生成按人维度的思想轨迹图（并发处理）。返回统计结果。"""
@@ -366,7 +584,25 @@ class JKReportGenerator:
                 header = f"# 即刻KOL思想轨迹 (占位版) - {uid}"
                 report_content = self._make_fallback_report(header, posts, start_time_global, end_time_global, sources)
             else:
-                report_content = llm_output + "\n\n" + self._render_sources_section(sources)
+                # 为LLM生成的报告添加标准头部信息
+                beijing_time = self._bj_time()
+                header_info = [
+                    f"# 🎯 即刻KOL思想轨迹 - {uid}",
+                    "",
+                    f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*数据范围: {start_time_global.strftime('%Y-%m-%d %H:%M:%S')} - {end_time_global.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*分析动态数: {len(posts)} 条*",
+                    "",
+                    "---",
+                    ""
+                ]
+
+                # 清理LLM输出中可能的格式问题
+                cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
 
             title = f"KOL思想轨迹 - {uid} - 截止 {end_time_global.strftime('%Y-%m-%d')}"
             row = {
@@ -378,7 +614,32 @@ class JKReportGenerator:
                 'report_title': title,
                 'report_content': report_content,
             }
-            _ = self.db.save_report(row)
+            report_id = self.db.save_report(row)
+
+            # 尝试推送KOL报告到Notion
+            try:
+                from .notion_client import jike_notion_client
+
+                # 格式化Notion标题
+                beijing_time = self._bj_time()
+                notion_title = f"KOL思想轨迹 - {uid} - {beijing_time.strftime('%Y%m%d')} ({len(posts)}条动态)"
+
+                self.logger.info(f"开始推送KOL报告到Notion: {notion_title}")
+
+                notion_result = jike_notion_client.create_report_page(
+                    report_title=notion_title,
+                    report_content=report_content,
+                    report_date=beijing_time
+                )
+
+                if notion_result.get('success'):
+                    self.logger.info(f"KOL报告成功推送到Notion: {notion_result.get('page_url')}")
+                else:
+                    self.logger.warning(f"推送KOL报告到Notion失败: {notion_result.get('error')}")
+
+            except Exception as e:
+                self.logger.warning(f"推送KOL报告到Notion时出错: {e}")
+
             return True
 
         with ThreadPoolExecutor(max_workers=self.max_llm_concurrency) as ex:

@@ -160,5 +160,12 @@ class Config:
             'kol_user_ids': kol_ids
         }
 
+    def get_notion_config(self) -> Dict[str, Any]:
+        """获取Notion集成配置，优先级：环境变量 > config.ini > 默认值"""
+        return {
+            'integration_token': self._get_config_value('notion', 'integration_token', 'NOTION_INTEGRATION_TOKEN', None),
+            'parent_page_id': self._get_config_value('notion', 'parent_page_id', 'NOTION_PARENT_PAGE_ID', None)
+        }
+
 # 全局配置实例
 config = Config()
