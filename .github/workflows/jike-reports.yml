@@ -50,6 +50,8 @@ jobs:
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -83,6 +85,8 @@ jobs:
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -117,6 +121,8 @@ jobs:
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
       ANALYSIS_KOL_USER_IDS: ${{ secrets.ANALYSIS_KOL_USER_IDS }}
+      NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -150,6 +156,8 @@ jobs:
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}
+      NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
