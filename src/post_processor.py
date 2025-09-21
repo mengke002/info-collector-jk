@@ -19,6 +19,14 @@ except ImportError:
     PIL_AVAILABLE = False
     logging.getLogger(__name__).warning("PIL/Pillow未安装，无法进行图片格式转换。请安装: pip install pillow")
 
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF_AVAILABLE = True
+except ImportError:
+    HEIF_AVAILABLE = False
+    logging.getLogger(__name__).warning("pillow-heif未安装，无法处理HEIC格式图片。请安装: pip install pillow-heif")
+
 from .config import config
 from .database import DatabaseManager
 from .llm_client import LLMClient
@@ -239,8 +247,18 @@ def download_and_convert_image(url: str, target_format: str = 'PNG', timeout: in
                     temp_file.write(chunk)
 
         try:
+            # 检查是否为HEIC格式
+            url_lower = url.lower()
+            is_heic = url_lower.endswith('.heic') or url_lower.endswith('.heif')
+
+            if is_heic and not HEIF_AVAILABLE:
+                logger.warning(f"HEIC格式图片需要pillow-heif支持，跳过转换: {url}")
+                return None
+
             # 使用PIL打开并转换图片
             with Image.open(temp_path) as img:
+                logger.debug(f"成功打开图片: {url}, 格式: {img.format}, 模式: {img.mode}, 尺寸: {img.size}")
+
                 # 转换RGBA模式以支持透明度
                 if img.mode in ('RGBA', 'LA'):
                     # 创建白色背景
@@ -272,6 +290,9 @@ def download_and_convert_image(url: str, target_format: str = 'PNG', timeout: in
 
         except Exception as e:
             logger.warning(f"图片转换失败: {url}, 错误: {e}")
+            # 如果是HEIC格式且没有安装支持库，给出更具体的提示
+            if url.lower().endswith(('.heic', '.heif')) and not HEIF_AVAILABLE:
+                logger.info(f"HEIC格式图片需要安装pillow-heif: pip install pillow-heif")
             return None
 
     except requests.exceptions.Timeout:
