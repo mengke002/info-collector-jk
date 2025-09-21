@@ -1,4 +1,4 @@
-name: Scheduled Post Interpretation
+name: Content Post Interpretation
 
 on:
   schedule:
