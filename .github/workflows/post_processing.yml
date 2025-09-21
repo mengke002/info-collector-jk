@@ -52,6 +52,9 @@ jobs:
           EXECUTOR_FAST_LLM_WORKERS: ${{ secrets.EXECUTOR_FAST_LLM_WORKERS }}
           EXECUTOR_FAST_VLM_WORKERS: ${{ secrets.EXECUTOR_FAST_VLM_WORKERS }}
           LOGGING_LOG_LEVEL: ${{ secrets.LOGGING_LOG_LEVEL }}
+
+          # DEBUG模式控制（默认开启详细日志）
+          LOGGING_DEBUG_MODE: ${{ vars.LOGGING_DEBUG_MODE || 'true' }}
         run: |
           HOURS_BACK="${{ github.event.inputs.hours_back || '36' }}"
           python3.12 main.py --task postprocess --hours-back $HOURS_BACK

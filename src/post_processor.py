@@ -119,13 +119,13 @@ def validate_image_url_accessible(url: str, timeout: int = 3) -> bool:
         return False
 
 
-def extract_image_urls_from_markdown(markdown_content: str, skip_accessibility_check: bool = True) -> List[str]:
+def extract_image_urls_from_markdown(markdown_content: str, skip_accessibility_check: bool = False) -> List[str]:
     """
     从Markdown内容中提取图片URL，并进行格式验证
 
     Args:
         markdown_content: Markdown格式的内容
-        skip_accessibility_check: 是否跳过可访问性检查（默认跳过以提高速度）
+        skip_accessibility_check: 是否跳过可访问性检查（默认进行检查以减少VLM错误）
 
     Returns:
         经过验证的图片URL列表
@@ -137,32 +137,46 @@ def extract_image_urls_from_markdown(markdown_content: str, skip_accessibility_c
     img_pattern = r'!\[.*?\]\((https?://[^)]+)\)'
     urls = re.findall(img_pattern, markdown_content)
 
+    if not urls:
+        return []
+
+    logger.debug(f"提取到{len(urls)}个图片URL，开始验证...")
+
     # 清理、标准化和验证URL
     valid_urls = []
-    for url in urls:
+    format_failed = 0
+    access_failed = 0
+
+    for i, url in enumerate(urls, 1):
         # 标准化URL
         clean_url = normalize_image_url(url)
         if not clean_url:
+            format_failed += 1
+            logger.debug(f"图片{i}: URL标准化失败 - {url}")
             continue
 
         # 格式验证（快速，本地验证）
         if not is_valid_image_url(clean_url):
-            logger.warning(f"图片URL格式无效，跳过: {clean_url}")
+            format_failed += 1
+            logger.debug(f"图片{i}: URL格式无效 - {clean_url}")
             continue
 
-        # 可访问性验证（可选，需要网络请求）
+        # 可访问性验证（网络请求验证）
         if not skip_accessibility_check:
             if not validate_image_url_accessible(clean_url, timeout=3):
-                logger.warning(f"图片URL无法访问，跳过: {clean_url}")
+                access_failed += 1
+                logger.debug(f"图片{i}: URL无法访问 - {clean_url}")
                 continue
 
         valid_urls.append(clean_url)
-        logger.debug(f"图片URL验证通过: {clean_url}")
+        logger.debug(f"图片{i}: 验证通过 - {clean_url}")
 
+    # 详细的验证结果日志
+    total_failed = format_failed + access_failed
     if skip_accessibility_check:
-        logger.info(f"从{len(urls)}个原始图片URL中格式验证通过{len(valid_urls)}个（跳过可访问性检查以提高速度）")
+        logger.info(f"图片URL验证完成: 原始{len(urls)}个 -> 有效{len(valid_urls)}个 (格式失败:{format_failed}个)")
     else:
-        logger.info(f"从{len(urls)}个原始图片URL中完全验证通过{len(valid_urls)}个")
+        logger.info(f"图片URL验证完成: 原始{len(urls)}个 -> 有效{len(valid_urls)}个 (格式失败:{format_failed}个, 访问失败:{access_failed}个)")
 
     return valid_urls
 
@@ -263,6 +277,9 @@ class PostProcessor:
         """
         self.logger.info(f"开始分类并发处理未解读的帖子，回溯{hours_back}小时")
 
+        # 获取DEBUG模式配置
+        debug_mode = config.get_logging_config().get('debug_mode', True)
+
         # 获取未处理的帖子
         unprocessed_posts = self.db_manager.get_unprocessed_posts(hours_back)
         total_posts = len(unprocessed_posts)
@@ -275,29 +292,93 @@ class PostProcessor:
         vlm_posts = []
         llm_posts = []
 
+        # 统计信息（只在debug模式下详细记录）
+        if debug_mode:
+            image_validation_stats = {
+                'total_posts_with_images': 0,
+                'total_image_urls': 0,
+                'valid_image_urls': 0,
+                'posts_downgraded_to_llm': 0
+            }
+
         for post in unprocessed_posts:
             post_text = post.get('summary', '') or post.get('title', '')
-            image_urls = extract_image_urls_from_markdown(post_text)
-            if len(image_urls) > 0:
-                vlm_posts.append(post)
+
+            # 检查是否包含图片
+            img_pattern = r'!\[.*?\]\((https?://[^)]+)\)'
+            raw_image_urls = re.findall(img_pattern, post_text)
+
+            if raw_image_urls:
+                if debug_mode:
+                    image_validation_stats['total_posts_with_images'] += 1
+                    image_validation_stats['total_image_urls'] += len(raw_image_urls)
+
+                # 验证图片URL
+                valid_image_urls = extract_image_urls_from_markdown(post_text)
+
+                if debug_mode:
+                    image_validation_stats['valid_image_urls'] += len(valid_image_urls)
+
+                if len(valid_image_urls) > 0:
+                    vlm_posts.append(post)
+                else:
+                    # 所有图片都无效，降级为LLM处理
+                    llm_posts.append(post)
+                    if debug_mode:
+                        image_validation_stats['posts_downgraded_to_llm'] += 1
+                        self.logger.info(f"帖子{post['id']}的所有图片URL都无效，降级为LLM处理")
             else:
                 llm_posts.append(post)
 
-        self.logger.info(f"帖子分类完成: 总数{total_posts}, VLM任务{len(vlm_posts)}个, LLM任务{len(llm_posts)}个")
+        # 打印分类统计（简化版或详细版）
+        if debug_mode:
+            self.logger.info("="*60)
+            self.logger.info("帖子分类和图片验证统计:")
+            self.logger.info(f"  总帖子数: {total_posts}")
+            self.logger.info(f"  包含图片的帖子: {image_validation_stats['total_posts_with_images']}")
+            self.logger.info(f"  纯文本帖子: {total_posts - image_validation_stats['total_posts_with_images']}")
+            self.logger.info(f"  VLM任务: {len(vlm_posts)}个")
+            self.logger.info(f"  LLM任务: {len(llm_posts)}个")
+
+            if image_validation_stats['total_image_urls'] > 0:
+                self.logger.info("图片URL验证详情:")
+                self.logger.info(f"  总图片URL数: {image_validation_stats['total_image_urls']}")
+                self.logger.info(f"  有效图片URL数: {image_validation_stats['valid_image_urls']}")
+                self.logger.info(f"  无效图片URL数: {image_validation_stats['total_image_urls'] - image_validation_stats['valid_image_urls']}")
+                self.logger.info(f"  图片验证成功率: {image_validation_stats['valid_image_urls']/image_validation_stats['total_image_urls']*100:.1f}%")
+                self.logger.info(f"  因图片全部无效而降级的帖子: {image_validation_stats['posts_downgraded_to_llm']}")
+            self.logger.info("="*60)
+        else:
+            self.logger.info(f"帖子分类完成: 总数{total_posts}, VLM任务{len(vlm_posts)}个, LLM任务{len(llm_posts)}个")
 
         # 使用两个独立的线程池处理不同类型的任务
         success_count = 0
         failed_count = 0
+
+        # Debug模式下的详细统计
+        if debug_mode:
+            vlm_success = 0
+            vlm_failed = 0
+            llm_success = 0
+            llm_failed = 0
+            vlm_format_errors = 0
+            vlm_downgraded = 0
 
         # 创建两个线程池分别处理VLM和LLM任务
         with ThreadPoolExecutor(max_workers=self.fast_vlm_workers, thread_name_prefix="VLM") as vlm_executor, \
              ThreadPoolExecutor(max_workers=self.fast_llm_workers, thread_name_prefix="LLM") as llm_executor:
 
             # 提交VLM任务
-            vlm_futures = {
-                vlm_executor.submit(self._process_vlm_post, post): post
-                for post in vlm_posts
-            }
+            if debug_mode:
+                vlm_futures = {
+                    vlm_executor.submit(self._process_vlm_post_with_stats, post): post
+                    for post in vlm_posts
+                }
+            else:
+                vlm_futures = {
+                    vlm_executor.submit(self._process_vlm_post, post): post
+                    for post in vlm_posts
+                }
 
             # 提交LLM任务
             llm_futures = {
@@ -311,19 +392,62 @@ class PostProcessor:
             # 处理完成的任务
             for i, future in enumerate(as_completed(all_futures), 1):
                 post = all_futures[future]
-                try:
-                    success = future.result()
-                    if success:
-                        success_count += 1
-                    else:
-                        failed_count += 1
+                is_vlm_task = future in vlm_futures
 
-                    if i % 10 == 0 or i == total_posts:
-                        self.logger.info(f"处理进度: {i}/{total_posts} ({success_count}成功, {failed_count}失败)")
+                try:
+                    if debug_mode and is_vlm_task:
+                        # Debug模式下VLM任务返回详细结果
+                        result = future.result()
+                        if result['success']:
+                            success_count += 1
+                            vlm_success += 1
+                            if result.get('downgraded', False):
+                                vlm_downgraded += 1
+                        else:
+                            failed_count += 1
+                            vlm_failed += 1
+                            if result.get('format_error', False):
+                                vlm_format_errors += 1
+                    else:
+                        # 普通模式或LLM任务返回布尔值
+                        success = future.result()
+                        if success:
+                            success_count += 1
+                            if debug_mode:
+                                if is_vlm_task:
+                                    vlm_success += 1
+                                else:
+                                    llm_success += 1
+                        else:
+                            failed_count += 1
+                            if debug_mode:
+                                if is_vlm_task:
+                                    vlm_failed += 1
+                                else:
+                                    llm_failed += 1
+
+                    # 定期打印进度信息
+                    progress_interval = 5 if debug_mode else 10
+                    if i % progress_interval == 0 or i == total_posts:
+                        if debug_mode:
+                            progress_percent = (i / total_posts) * 100
+                            self.logger.info(
+                                f"处理进度: {i}/{total_posts} ({progress_percent:.1f}%) | "
+                                f"成功:{success_count} 失败:{failed_count} | "
+                                f"VLM成功:{vlm_success} VLM失败:{vlm_failed} | "
+                                f"LLM成功:{llm_success} LLM失败:{llm_failed}"
+                            )
+                        else:
+                            self.logger.info(f"处理进度: {i}/{total_posts} ({success_count}成功, {failed_count}失败)")
 
                 except Exception as e:
                     self.logger.error(f"处理帖子{post['id']}时发生异常: {e}", exc_info=True)
                     failed_count += 1
+                    if debug_mode:
+                        if is_vlm_task:
+                            vlm_failed += 1
+                        else:
+                            llm_failed += 1
 
                     # 记录失败状态
                     try:
@@ -336,6 +460,7 @@ class PostProcessor:
                     except Exception as save_error:
                         self.logger.error(f"保存失败状态时出错: {save_error}")
 
+        # 构建结果
         result = {
             'total': total_posts,
             'success': success_count,
@@ -344,7 +469,33 @@ class PostProcessor:
             'llm_posts': len(llm_posts)
         }
 
-        self.logger.info(f"分类并发处理完成: {result}")
+        # Debug模式下添加详细统计
+        if debug_mode:
+            result.update({
+                'vlm_success': vlm_success,
+                'vlm_failed': vlm_failed,
+                'llm_success': llm_success,
+                'llm_failed': llm_failed,
+                'vlm_format_errors': vlm_format_errors,
+                'vlm_downgraded': vlm_downgraded,
+                **image_validation_stats
+            })
+
+        # 最终统计日志
+        if debug_mode:
+            self.logger.info("="*60)
+            self.logger.info("处理完成，最终统计:")
+            self.logger.info(f"  总体成功率: {success_count}/{total_posts} ({success_count/total_posts*100:.1f}%)")
+            self.logger.info(f"  VLM任务: {vlm_success}/{len(vlm_posts)} 成功 ({vlm_success/len(vlm_posts)*100:.1f}% 成功率)" if vlm_posts else "  VLM任务: 0个")
+            self.logger.info(f"  LLM任务: {llm_success}/{len(llm_posts)} 成功 ({llm_success/len(llm_posts)*100:.1f}% 成功率)" if llm_posts else "  LLM任务: 0个")
+            if vlm_format_errors > 0:
+                self.logger.info(f"  VLM图片格式错误: {vlm_format_errors}个")
+            if vlm_downgraded > 0:
+                self.logger.info(f"  VLM失败后降级成功: {vlm_downgraded}个")
+            self.logger.info("="*60)
+        else:
+            self.logger.info(f"分类并发处理完成: {result}")
+
         return result
 
     def _process_vlm_post(self, post: Dict[str, Any]) -> bool:
@@ -424,6 +575,99 @@ class PostProcessor:
             except Exception as save_error:
                 self.logger.error(f"保存错误状态失败: {save_error}")
             return False
+
+    def _process_vlm_post_with_stats(self, post: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理需要VLM的帖子，返回详细统计信息（Debug模式）
+
+        Args:
+            post: 帖子信息字典
+
+        Returns:
+            包含成功状态和详细信息的字典
+        """
+        post_id = post['id']
+        post_text = post.get('summary', '') or post.get('title', '')
+
+        result = {
+            'success': False,
+            'downgraded': False,
+            'format_error': False
+        }
+
+        if not post_text:
+            self.logger.warning(f"VLM帖子{post_id}没有内容，跳过处理")
+            return result
+
+        # 提取并验证图片URL
+        image_urls = extract_image_urls_from_markdown(post_text)
+
+        # 如果没有有效的图片URL，降级为纯文本处理
+        if not image_urls:
+            self.logger.info(f"帖子{post_id}没有有效图片URL，降级为LLM处理")
+            success = self._process_llm_post(post)
+            result['success'] = success
+            result['downgraded'] = success
+            return result
+
+        try:
+            self.logger.debug(f"VLM处理帖子{post_id}，包含{len(image_urls)}张有效图片")
+            interpretation = self._call_vlm_for_post(post_text, image_urls)
+
+            if interpretation:
+                # 保存解读结果
+                self.db_manager.save_post_interpretation(
+                    post_id,
+                    interpretation,
+                    self.vlm_model,
+                    'success'
+                )
+                self.logger.debug(f"VLM帖子{post_id}处理成功")
+                result['success'] = True
+                return result
+            else:
+                # VLM失败时，检查是否是格式错误
+                result['format_error'] = True
+
+                # VLM失败时，保存失败记录并尝试降级为纯文本处理
+                self.logger.warning(f"VLM帖子{post_id}解读失败，尝试降级为LLM处理")
+
+                # 尝试纯文本处理作为降级方案
+                fallback_interpretation = self._call_llm_for_post(post_text)
+                if fallback_interpretation:
+                    self.db_manager.save_post_interpretation(
+                        post_id,
+                        f"[降级处理] {fallback_interpretation}",
+                        self.fast_model,
+                        'success'
+                    )
+                    self.logger.info(f"帖子{post_id}降级为LLM处理成功")
+                    result['success'] = True
+                    result['downgraded'] = True
+                    return result
+                else:
+                    # 记录最终失败
+                    self.db_manager.save_post_interpretation(
+                        post_id,
+                        "VLM和LLM处理均失败",
+                        "failed",
+                        'failed'
+                    )
+                    return result
+
+        except Exception as e:
+            self.logger.error(f"VLM处理帖子{post_id}时出错: {e}")
+            # 记录错误状态
+            try:
+                self.db_manager.save_post_interpretation(
+                    post_id,
+                    f"处理异常: {str(e)}",
+                    "error",
+                    'failed'
+                )
+            except Exception as save_error:
+                self.logger.error(f"保存错误状态失败: {save_error}")
+            return result
 
     def _process_llm_post(self, post: Dict[str, Any]) -> bool:
         """

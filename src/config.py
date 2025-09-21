@@ -120,11 +120,20 @@ class Config:
         """获取数据保留天数"""
         return self._get_config_value('data_retention', 'days', 'DATA_RETENTION_DAYS', 180, int)
     
-    def get_logging_config(self) -> Dict[str, str]:
+    def get_logging_config(self) -> Dict[str, Any]:
         """获取日志配置"""
+        # 将字符串转换为布尔值的辅助函数
+        def str_to_bool(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes', 'on')
+            return bool(value)
+
         return {
             'log_level': self._get_config_value('logging', 'log_level', 'LOGGING_LOG_LEVEL', 'INFO'),
-            'log_file': self._get_config_value('logging', 'log_file', 'LOGGING_LOG_FILE', 'jike_crawler.log')
+            'log_file': self._get_config_value('logging', 'log_file', 'LOGGING_LOG_FILE', 'jike_crawler.log'),
+            'debug_mode': self._get_config_value('logging', 'debug_mode', 'LOGGING_DEBUG_MODE', True, str_to_bool)
         }
     
     def get_executor_config(self) -> Dict[str, Any]:
