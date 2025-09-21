@@ -141,7 +141,8 @@ class Config:
         return {
             'max_workers': self._get_config_value('executor', 'max_workers', 'EXECUTOR_MAX_WORKERS', 10, int),
             'fast_llm_workers': self._get_config_value('executor', 'fast_llm_workers', 'EXECUTOR_FAST_LLM_WORKERS', 8, int),
-            'fast_vlm_workers': self._get_config_value('executor', 'fast_vlm_workers', 'EXECUTOR_FAST_VLM_WORKERS', 4, int)
+            'fast_vlm_workers': self._get_config_value('executor', 'fast_vlm_workers', 'EXECUTOR_FAST_VLM_WORKERS', 4, int),
+            'image_processing_workers': self._get_config_value('executor', 'image_processing_workers', 'EXECUTOR_IMAGE_PROCESSING_WORKERS', 12, int)
         }
     
     def get_max_workers(self) -> int:

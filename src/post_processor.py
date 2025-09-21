@@ -8,9 +8,11 @@ import requests
 import base64
 import os
 import tempfile
+import time
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlparse, urlunparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from threading import Lock
 
 try:
     from PIL import Image
@@ -32,6 +34,56 @@ from .database import DatabaseManager
 from .llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+class ImageCache:
+    """图片缓存管理器，支持异步转换和缓存"""
+
+    def __init__(self):
+        self._cache: Dict[str, Optional[str]] = {}  # URL -> base64 or None if failed
+        self._processing: Dict[str, Future] = {}   # URL -> Future
+        self._lock = Lock()
+
+    def get_cached_image(self, url: str) -> Optional[str]:
+        """获取缓存的图片base64，如果没有缓存返回None"""
+        with self._lock:
+            return self._cache.get(url)
+
+    def is_processing(self, url: str) -> bool:
+        """检查图片是否正在处理中"""
+        with self._lock:
+            return url in self._processing
+
+    def start_processing(self, url: str, future: Future) -> None:
+        """标记图片开始处理"""
+        with self._lock:
+            self._processing[url] = future
+
+    def finish_processing(self, url: str, result: Optional[str]) -> None:
+        """完成图片处理，缓存结果"""
+        with self._lock:
+            self._cache[url] = result
+            if url in self._processing:
+                del self._processing[url]
+
+    def wait_for_processing(self, url: str, timeout: float = 30.0) -> Optional[str]:
+        """等待图片处理完成，返回结果"""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            with self._lock:
+                if url in self._cache:
+                    return self._cache[url]
+                if url not in self._processing:
+                    return None  # 没有在处理，说明处理失败或未开始
+
+            time.sleep(0.1)  # 短暂等待
+
+        logger.warning(f"等待图片处理超时: {url}")
+        return None
+
+
+# 全局图片缓存实例
+image_cache = ImageCache()
 
 
 def normalize_image_url(url: str) -> str:
@@ -208,6 +260,71 @@ def batch_validate_image_urls(image_urls: List[str], max_workers: int = 10) -> D
     )
 
     return result_map
+
+
+def download_and_convert_image_async(url: str, target_format: str = 'PNG', timeout: int = 10) -> Optional[str]:
+    """
+    异步图片转换的包装函数，支持缓存
+    """
+    # 检查是否已有缓存
+    cached_result = image_cache.get_cached_image(url)
+    if cached_result is not None:
+        logger.debug(f"使用缓存图片: {url}")
+        return cached_result
+
+    # 如果正在处理中，等待完成
+    if image_cache.is_processing(url):
+        logger.debug(f"等待图片处理完成: {url}")
+        return image_cache.wait_for_processing(url)
+
+    # 执行转换
+    result = download_and_convert_image(url, target_format, timeout)
+
+    # 缓存结果
+    image_cache.finish_processing(url, result)
+
+    return result
+
+
+def start_background_image_processing(non_standard_urls: List[str], max_workers: int = 12) -> ThreadPoolExecutor:
+    """
+    启动后台图片处理任务
+
+    Args:
+        non_standard_urls: 需要转换的非标准格式图片URL列表
+        max_workers: 最大并发数
+
+    Returns:
+        图片处理线程池
+    """
+    logger.info(f"启动后台图片处理任务: {len(non_standard_urls)}个非标准格式图片")
+
+    executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="BgImageProcessor")
+
+    # 为每个URL启动后台处理任务
+    for url in non_standard_urls:
+        if not image_cache.is_processing(url) and image_cache.get_cached_image(url) is None:
+            future = executor.submit(download_and_convert_image, url)
+            image_cache.start_processing(url, future)
+
+            # 添加完成回调来缓存结果
+            def on_complete(url=url):
+                def callback(future):
+                    try:
+                        result = future.result()
+                        image_cache.finish_processing(url, result)
+                        if result:
+                            logger.debug(f"后台图片处理完成: {url}")
+                        else:
+                            logger.debug(f"后台图片处理失败: {url}")
+                    except Exception as e:
+                        logger.debug(f"后台图片处理异常: {url}, 错误: {e}")
+                        image_cache.finish_processing(url, None)
+                return callback
+
+            future.add_done_callback(on_complete())
+
+    return executor
 
 
 def download_and_convert_image(url: str, target_format: str = 'PNG', timeout: int = 10) -> Optional[str]:
@@ -540,10 +657,12 @@ class PostProcessor:
         executor_config = config.get_executor_config()
         self.fast_llm_workers = executor_config['fast_llm_workers']
         self.fast_vlm_workers = executor_config['fast_vlm_workers']
+        self.image_processing_workers = executor_config['image_processing_workers']
 
         self.logger.info("Post处理器初始化完成")
         self.logger.info(f"快速文本模型: {self.fast_model} (并发数: {self.fast_llm_workers})")
         self.logger.info(f"视觉多模态模型: {self.vlm_model} (并发数: {self.fast_vlm_workers})")
+        self.logger.info(f"图像处理并发数: {self.image_processing_workers}")
 
     def process_unprocessed_posts(self, hours_back: int = 36) -> Dict[str, int]:
         """
@@ -614,212 +733,178 @@ class PostProcessor:
             else:
                 llm_posts.append(post)
 
-        # 第二步：批量处理所有图片（PNG保持URL，非PNG转换为base64）
-        image_processing_results = {}
-        if all_image_urls:
-            image_processing_results = batch_process_mixed_images(all_image_urls, max_workers=6)
+        # 第二步：智能分类处理策略
+        immediate_posts = []  # 可立即处理的帖子（标准格式图片或纯文本）
+        delayed_posts = []    # 需要等待图片转换的帖子
+        standard_format_urls = []
+        non_standard_urls = []
 
-            # 根据处理结果重新分类帖子
-            vlm_posts_final = []
-            for post in vlm_posts:
-                post_urls = post_image_mapping[post['id']]
-                valid_image_data = []
+        # 分类图片URL和对应的帖子
+        for post in vlm_posts:
+            post_urls = post_image_mapping[post['id']]
+            has_non_standard = False
 
-                for url in post_urls:
-                    result = image_processing_results.get(url)
-                    if result and result.get('success', False):
-                        # 添加原始URL信息用于日志
-                        img_data = {
-                            'type': result['type'],
-                            'data': result['data'],
-                            'url': url,
-                            'success': True
-                        }
-                        valid_image_data.append(img_data)
-
-                if valid_image_data:
-                    vlm_posts_final.append(post)
-                    # 保存处理好的图片数据
-                    post_image_mapping[post['id']] = valid_image_data
+            for url in post_urls:
+                if is_standard_format(url):
+                    standard_format_urls.append(url)
                 else:
-                    # 所有图片都处理失败，降级为LLM
-                    llm_posts.append(post)
-                    if debug_mode:
-                        image_stats['posts_downgraded_to_llm'] += 1
-                        logger.debug(f"帖子{post['id']}的所有图片都处理失败，降级为LLM处理")
+                    non_standard_urls.append(url)
+                    has_non_standard = True
 
-            vlm_posts = vlm_posts_final
+            # 如果帖子只包含标准格式图片，可以立即处理
+            if not has_non_standard:
+                immediate_posts.append(post)
+            else:
+                delayed_posts.append(post)
 
-            if debug_mode:
-                processed_success = sum(1 for v in image_processing_results.values() if v.get('success', False))
-                image_stats['processed_success'] = processed_success
+        # 所有纯文本帖子都可以立即处理
+        immediate_posts.extend(llm_posts)
 
-        # 打印分类统计（简化版或详细版）
-        if debug_mode:
-            self.logger.info("="*60)
-            self.logger.info("帖子分类和图片验证统计:")
-            self.logger.info(f"  总帖子数: {total_posts}")
-            self.logger.info(f"  包含图片的帖子: {image_validation_stats['total_posts_with_images']}")
-            self.logger.info(f"  纯文本帖子: {total_posts - image_validation_stats['total_posts_with_images']}")
-            self.logger.info(f"  VLM任务: {len(vlm_posts)}个")
-            self.logger.info(f"  LLM任务: {len(llm_posts)}个")
+        # 去重非标准格式URL
+        non_standard_urls = list(set(non_standard_urls))
 
-            if image_validation_stats['total_image_urls'] > 0:
-                self.logger.info("图片URL验证详情:")
-                self.logger.info(f"  总图片URL数: {image_validation_stats['total_image_urls']}")
-                self.logger.info(f"  有效图片URL数: {image_validation_stats['valid_image_urls']}")
-                self.logger.info(f"  无效图片URL数: {image_validation_stats['total_image_urls'] - image_validation_stats['valid_image_urls']}")
-                self.logger.info(f"  图片验证成功率: {image_validation_stats['valid_image_urls']/image_validation_stats['total_image_urls']*100:.1f}%")
-                self.logger.info(f"  因图片全部无效而降级的帖子: {image_validation_stats['posts_downgraded_to_llm']}")
-            self.logger.info("="*60)
-        else:
-            self.logger.info(f"帖子分类完成: 总数{total_posts}, VLM任务{len(vlm_posts)}个, LLM任务{len(llm_posts)}个")
+        self.logger.info(f"处理策略分类完成:")
+        self.logger.info(f"  立即处理: {len(immediate_posts)}个帖子 (标准格式图片或纯文本)")
+        self.logger.info(f"  延迟处理: {len(delayed_posts)}个帖子 (包含非标准格式图片)")
+        self.logger.info(f"  需转换图片: {len(non_standard_urls)}个非标准格式图片")
 
-        # 使用两个独立的线程池处理不同类型的任务
+        # 第三步：启动后台图片处理任务
+        bg_executor = None
+        if non_standard_urls:
+            bg_executor = start_background_image_processing(non_standard_urls, self.image_processing_workers)
+
+        # 第四步：立即处理可处理的帖子
         success_count = 0
         failed_count = 0
 
-        # Debug模式下的详细统计
-        if debug_mode:
-            vlm_success = 0
-            vlm_failed = 0
-            llm_success = 0
-            llm_failed = 0
-            vlm_format_errors = 0
-            vlm_downgraded = 0
+        self.logger.info(f"开始立即处理{len(immediate_posts)}个帖子...")
 
         # 创建两个线程池分别处理VLM和LLM任务
         with ThreadPoolExecutor(max_workers=self.fast_vlm_workers, thread_name_prefix="VLM") as vlm_executor, \
              ThreadPoolExecutor(max_workers=self.fast_llm_workers, thread_name_prefix="LLM") as llm_executor:
 
-            # 提交VLM任务
-            if debug_mode:
-                vlm_futures = {
-                    vlm_executor.submit(self._process_vlm_post_with_stats, post, post_image_mapping.get(post['id'], [])): post
-                    for post in vlm_posts
-                }
-            else:
-                vlm_futures = {
-                    vlm_executor.submit(self._process_vlm_post, post, post_image_mapping.get(post['id'], [])): post
-                    for post in vlm_posts
-                }
+            # 分类立即处理的帖子
+            immediate_vlm_posts = [p for p in immediate_posts if p in vlm_posts]
+            immediate_llm_posts = [p for p in immediate_posts if p in llm_posts]
 
-            # 提交LLM任务
-            llm_futures = {
-                llm_executor.submit(self._process_llm_post, post): post
-                for post in llm_posts
-            }
+            # 提交立即处理任务
+            vlm_futures = {}
+            llm_futures = {}
 
-            # 合并所有futures
-            all_futures = {**vlm_futures, **llm_futures}
+            # 处理包含标准格式图片的帖子
+            for post in immediate_vlm_posts:
+                post_urls = post_image_mapping[post['id']]
+                # 构建标准格式图片数据
+                image_data = []
+                for url in post_urls:
+                    if is_standard_format(url):
+                        image_data.append({
+                            'type': 'url',
+                            'data': url,
+                            'url': url,
+                            'success': True
+                        })
 
-            # 处理完成的任务
-            for i, future in enumerate(as_completed(all_futures), 1):
-                post = all_futures[future]
-                is_vlm_task = future in vlm_futures
+                if image_data:
+                    vlm_futures[vlm_executor.submit(self._process_vlm_post, post, image_data)] = post
 
+            # 处理纯文本帖子
+            for post in immediate_llm_posts:
+                llm_futures[llm_executor.submit(self._process_llm_post, post)] = post
+
+            # 收集立即处理的结果
+            all_immediate_futures = {**vlm_futures, **llm_futures}
+
+            for i, future in enumerate(as_completed(all_immediate_futures), 1):
+                post = all_immediate_futures[future]
                 try:
-                    if debug_mode and is_vlm_task:
-                        # Debug模式下VLM任务返回详细结果
-                        result = future.result()
-                        if result['success']:
-                            success_count += 1
-                            vlm_success += 1
-                            if result.get('downgraded', False):
-                                vlm_downgraded += 1
-                        else:
-                            failed_count += 1
-                            vlm_failed += 1
-                            if result.get('format_error', False):
-                                vlm_format_errors += 1
+                    success = future.result()
+                    if success:
+                        success_count += 1
                     else:
-                        # 普通模式或LLM任务返回布尔值
+                        failed_count += 1
+
+                    if i % 10 == 0 or i == len(all_immediate_futures):
+                        self.logger.info(f"立即处理进度: {i}/{len(all_immediate_futures)} ({success_count}成功, {failed_count}失败)")
+
+                except Exception as e:
+                    self.logger.error(f"处理帖子{post['id']}时发生异常: {e}")
+                    failed_count += 1
+
+        # 第五步：等待后台图片处理完成，然后处理延迟帖子
+        if delayed_posts and bg_executor:
+            self.logger.info(f"等待后台图片处理完成，然后处理{len(delayed_posts)}个延迟帖子...")
+
+            # 等待一段时间让后台处理有时间完成
+            time.sleep(2)
+
+            with ThreadPoolExecutor(max_workers=self.fast_vlm_workers, thread_name_prefix="DelayedVLM") as delayed_executor:
+                delayed_futures = {}
+
+                for post in delayed_posts:
+                    post_urls = post_image_mapping[post['id']]
+                    mixed_image_data = []
+
+                    for url in post_urls:
+                        if is_standard_format(url):
+                            # 标准格式直接使用URL
+                            mixed_image_data.append({
+                                'type': 'url',
+                                'data': url,
+                                'url': url,
+                                'success': True
+                            })
+                        else:
+                            # 非标准格式从缓存获取
+                            base64_data = download_and_convert_image_async(url)
+                            if base64_data:
+                                mixed_image_data.append({
+                                    'type': 'base64',
+                                    'data': base64_data,
+                                    'url': url,
+                                    'success': True
+                                })
+                            else:
+                                self.logger.warning(f"图片转换失败，跳过: {url}")
+
+                    # 如果至少有一张有效图片，提交VLM处理
+                    if mixed_image_data:
+                        delayed_futures[delayed_executor.submit(self._process_vlm_post, post, mixed_image_data)] = post
+                    else:
+                        # 所有图片都失败，降级为LLM处理
+                        delayed_futures[delayed_executor.submit(self._process_llm_post, post)] = post
+
+                # 收集延迟处理的结果
+                for i, future in enumerate(as_completed(delayed_futures), 1):
+                    post = delayed_futures[future]
+                    try:
                         success = future.result()
                         if success:
                             success_count += 1
-                            if debug_mode:
-                                if is_vlm_task:
-                                    vlm_success += 1
-                                else:
-                                    llm_success += 1
                         else:
                             failed_count += 1
-                            if debug_mode:
-                                if is_vlm_task:
-                                    vlm_failed += 1
-                                else:
-                                    llm_failed += 1
 
-                    # 定期打印进度信息
-                    progress_interval = 5 if debug_mode else 10
-                    if i % progress_interval == 0 or i == total_posts:
-                        if debug_mode:
-                            progress_percent = (i / total_posts) * 100
-                            self.logger.info(
-                                f"处理进度: {i}/{total_posts} ({progress_percent:.1f}%) | "
-                                f"成功:{success_count} 失败:{failed_count} | "
-                                f"VLM成功:{vlm_success} VLM失败:{vlm_failed} | "
-                                f"LLM成功:{llm_success} LLM失败:{llm_failed}"
-                            )
-                        else:
-                            self.logger.info(f"处理进度: {i}/{total_posts} ({success_count}成功, {failed_count}失败)")
+                        if i % 5 == 0 or i == len(delayed_futures):
+                            self.logger.info(f"延迟处理进度: {i}/{len(delayed_futures)} ({success_count}成功, {failed_count}失败)")
 
-                except Exception as e:
-                    self.logger.error(f"处理帖子{post['id']}时发生异常: {e}", exc_info=True)
-                    failed_count += 1
-                    if debug_mode:
-                        if is_vlm_task:
-                            vlm_failed += 1
-                        else:
-                            llm_failed += 1
+                    except Exception as e:
+                        self.logger.error(f"处理延迟帖子{post['id']}时发生异常: {e}")
+                        failed_count += 1
 
-                    # 记录失败状态
-                    try:
-                        self.db_manager.save_post_interpretation(
-                            post['id'],
-                            f"并发处理异常: {str(e)}",
-                            "error",
-                            'failed'
-                        )
-                    except Exception as save_error:
-                        self.logger.error(f"保存失败状态时出错: {save_error}")
+        # 清理后台处理器
+        if bg_executor:
+            bg_executor.shutdown(wait=False)
 
         # 构建结果
         result = {
             'total': total_posts,
             'success': success_count,
             'failed': failed_count,
-            'vlm_posts': len(vlm_posts),
-            'llm_posts': len(llm_posts)
+            'immediate_posts': len(immediate_posts),
+            'delayed_posts': len(delayed_posts)
         }
 
-        # Debug模式下添加详细统计
-        if debug_mode:
-            result.update({
-                'vlm_success': vlm_success,
-                'vlm_failed': vlm_failed,
-                'llm_success': llm_success,
-                'llm_failed': llm_failed,
-                'vlm_format_errors': vlm_format_errors,
-                'vlm_downgraded': vlm_downgraded,
-                **image_validation_stats
-            })
-
-        # 最终统计日志
-        if debug_mode:
-            self.logger.info("="*60)
-            self.logger.info("处理完成，最终统计:")
-            self.logger.info(f"  总体成功率: {success_count}/{total_posts} ({success_count/total_posts*100:.1f}%)")
-            self.logger.info(f"  VLM任务: {vlm_success}/{len(vlm_posts)} 成功 ({vlm_success/len(vlm_posts)*100:.1f}% 成功率)" if vlm_posts else "  VLM任务: 0个")
-            self.logger.info(f"  LLM任务: {llm_success}/{len(llm_posts)} 成功 ({llm_success/len(llm_posts)*100:.1f}% 成功率)" if llm_posts else "  LLM任务: 0个")
-            if vlm_format_errors > 0:
-                self.logger.info(f"  VLM图片格式错误: {vlm_format_errors}个")
-            if vlm_downgraded > 0:
-                self.logger.info(f"  VLM失败后降级成功: {vlm_downgraded}个")
-            self.logger.info("="*60)
-        else:
-            self.logger.info(f"分类并发处理完成: {result}")
-
+        self.logger.info(f"异步处理完成: {result}")
         return result
 
     def _process_vlm_post(self, post: Dict[str, Any], validated_image_data: List[Dict[str, Any]] = None) -> bool:
