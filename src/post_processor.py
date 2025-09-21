@@ -119,16 +119,89 @@ def validate_image_url_accessible(url: str, timeout: int = 3) -> bool:
         return False
 
 
+def batch_validate_image_urls(image_urls: List[str], max_workers: int = 10) -> Dict[str, bool]:
+    """
+    批量并发验证图片URL
+
+    Args:
+        image_urls: 图片URL列表
+        max_workers: 最大并发数
+
+    Returns:
+        URL到验证结果的映射
+    """
+    if not image_urls:
+        return {}
+
+    # 去重
+    unique_urls = list(set(image_urls))
+    logger.debug(f"开始批量验证{len(unique_urls)}个唯一图片URL...")
+
+    # 先进行格式验证（无网络开销）
+    format_valid_urls = []
+    format_failed = 0
+
+    for url in unique_urls:
+        clean_url = normalize_image_url(url)
+        if clean_url and is_valid_image_url(clean_url):
+            format_valid_urls.append(clean_url)
+        else:
+            format_failed += 1
+
+    # 并发进行网络可访问性验证
+    url_validation_results = {}
+    access_failed = 0
+
+    if format_valid_urls:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="URLValidation") as executor:
+            # 提交所有验证任务
+            future_to_url = {
+                executor.submit(validate_image_url_accessible, url, 3): url
+                for url in format_valid_urls
+            }
+
+            # 收集结果
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    is_accessible = future.result()
+                    url_validation_results[url] = is_accessible
+                    if not is_accessible:
+                        access_failed += 1
+                except Exception as e:
+                    logger.debug(f"验证URL {url} 时发生异常: {e}")
+                    url_validation_results[url] = False
+                    access_failed += 1
+
+    # 为所有原始 URL 生成结果映射
+    result_map = {}
+    for original_url in image_urls:
+        clean_url = normalize_image_url(original_url)
+        if clean_url and is_valid_image_url(clean_url):
+            result_map[original_url] = url_validation_results.get(clean_url, False)
+        else:
+            result_map[original_url] = False
+
+    # 统计日志
+    valid_count = sum(1 for v in result_map.values() if v)
+    logger.info(
+        f"批量图片验证完成: 原始{len(image_urls)}个 -> 有效{valid_count}个 "
+        f"(格式失败:{format_failed}个, 访问失败:{access_failed}个)"
+    )
+
+    return result_map
+
+
 def extract_image_urls_from_markdown(markdown_content: str, skip_accessibility_check: bool = False) -> List[str]:
     """
-    从Markdown内容中提取图片URL，并进行格式验证
+    从Markdown内容中提取图片URL（简化版，不进行网络验证）
 
     Args:
         markdown_content: Markdown格式的内容
-        skip_accessibility_check: 是否跳过可访问性检查（默认进行检查以减少VLM错误）
+        skip_accessibility_check: 是否跳过可访问性检查（此参数已废弃，保留以兼容）
 
     Returns:
-        经过验证的图片URL列表
+        经过格式验证的图片URL列表
     """
     if not markdown_content:
         return []
@@ -140,43 +213,12 @@ def extract_image_urls_from_markdown(markdown_content: str, skip_accessibility_c
     if not urls:
         return []
 
-    logger.debug(f"提取到{len(urls)}个图片URL，开始验证...")
-
-    # 清理、标准化和验证URL
+    # 只进行格式验证，不进行网络验证
     valid_urls = []
-    format_failed = 0
-    access_failed = 0
-
-    for i, url in enumerate(urls, 1):
-        # 标准化URL
+    for url in urls:
         clean_url = normalize_image_url(url)
-        if not clean_url:
-            format_failed += 1
-            logger.debug(f"图片{i}: URL标准化失败 - {url}")
-            continue
-
-        # 格式验证（快速，本地验证）
-        if not is_valid_image_url(clean_url):
-            format_failed += 1
-            logger.debug(f"图片{i}: URL格式无效 - {clean_url}")
-            continue
-
-        # 可访问性验证（网络请求验证）
-        if not skip_accessibility_check:
-            if not validate_image_url_accessible(clean_url, timeout=3):
-                access_failed += 1
-                logger.debug(f"图片{i}: URL无法访问 - {clean_url}")
-                continue
-
-        valid_urls.append(clean_url)
-        logger.debug(f"图片{i}: 验证通过 - {clean_url}")
-
-    # 详细的验证结果日志
-    total_failed = format_failed + access_failed
-    if skip_accessibility_check:
-        logger.info(f"图片URL验证完成: 原始{len(urls)}个 -> 有效{len(valid_urls)}个 (格式失败:{format_failed}个)")
-    else:
-        logger.info(f"图片URL验证完成: 原始{len(urls)}个 -> 有效{len(valid_urls)}个 (格式失败:{format_failed}个, 访问失败:{access_failed}个)")
+        if clean_url and is_valid_image_url(clean_url):
+            valid_urls.append(clean_url)
 
     return valid_urls
 
@@ -288,9 +330,11 @@ class PostProcessor:
             self.logger.info("没有找到需要处理的帖子")
             return {'total': 0, 'success': 0, 'failed': 0}
 
-        # 分类帖子：有图片的和纯文本的
+        # 分类帖子：有图片的和纯文本的，同时收集所有图片URL
         vlm_posts = []
         llm_posts = []
+        all_image_urls = []  # 收集所有需要验证的图片URL
+        post_image_mapping = {}  # 帖子到图片URL的映射
 
         # 统计信息（只在debug模式下详细记录）
         if debug_mode:
@@ -301,34 +345,62 @@ class PostProcessor:
                 'posts_downgraded_to_llm': 0
             }
 
+        # 第一步：快速分类和收集图片URL
         for post in unprocessed_posts:
             post_text = post.get('summary', '') or post.get('title', '')
 
-            # 检查是否包含图片
+            # 检查是否包含图片（只进行格式验证）
             img_pattern = r'!\[.*?\]\((https?://[^)]+)\)'
             raw_image_urls = re.findall(img_pattern, post_text)
 
             if raw_image_urls:
-                if debug_mode:
-                    image_validation_stats['total_posts_with_images'] += 1
-                    image_validation_stats['total_image_urls'] += len(raw_image_urls)
+                # 进行格式验证
+                format_valid_urls = extract_image_urls_from_markdown(post_text)
 
-                # 验证图片URL
-                valid_image_urls = extract_image_urls_from_markdown(post_text)
-
-                if debug_mode:
-                    image_validation_stats['valid_image_urls'] += len(valid_image_urls)
-
-                if len(valid_image_urls) > 0:
+                if format_valid_urls:
                     vlm_posts.append(post)
+                    post_image_mapping[post['id']] = format_valid_urls
+                    all_image_urls.extend(format_valid_urls)
+
+                    if debug_mode:
+                        image_validation_stats['total_posts_with_images'] += 1
+                        image_validation_stats['total_image_urls'] += len(raw_image_urls)
                 else:
-                    # 所有图片都无效，降级为LLM处理
+                    # 格式验证全部失败，直接降级为LLM
+                    llm_posts.append(post)
+                    if debug_mode:
+                        image_validation_stats['total_posts_with_images'] += 1
+                        image_validation_stats['total_image_urls'] += len(raw_image_urls)
+                        image_validation_stats['posts_downgraded_to_llm'] += 1
+            else:
+                llm_posts.append(post)
+
+        # 第二步：批量并发验证所有图片URL
+        url_validation_results = {}
+        if all_image_urls:
+            logger.info(f"开始批量验证{len(set(all_image_urls))}个唯一图片URL...")
+            url_validation_results = batch_validate_image_urls(all_image_urls, max_workers=8)
+
+            # 根据验证结果重新分类帖子
+            vlm_posts_final = []
+            for post in vlm_posts:
+                post_urls = post_image_mapping[post['id']]
+                valid_urls = [url for url in post_urls if url_validation_results.get(url, False)]
+
+                if valid_urls:
+                    vlm_posts_final.append(post)
+                    post_image_mapping[post['id']] = valid_urls  # 更新为有效的URL
+                else:
+                    # 所有图片都无效，降级为LLM
                     llm_posts.append(post)
                     if debug_mode:
                         image_validation_stats['posts_downgraded_to_llm'] += 1
-                        self.logger.info(f"帖子{post['id']}的所有图片URL都无效，降级为LLM处理")
-            else:
-                llm_posts.append(post)
+                        logger.debug(f"帖子{post['id']}的所有图片URL都无法访问，降级为LLM处理")
+
+            vlm_posts = vlm_posts_final
+
+            if debug_mode:
+                image_validation_stats['valid_image_urls'] = sum(1 for v in url_validation_results.values() if v)
 
         # 打印分类统计（简化版或详细版）
         if debug_mode:
@@ -371,12 +443,12 @@ class PostProcessor:
             # 提交VLM任务
             if debug_mode:
                 vlm_futures = {
-                    vlm_executor.submit(self._process_vlm_post_with_stats, post): post
+                    vlm_executor.submit(self._process_vlm_post_with_stats, post, post_image_mapping.get(post['id'], [])): post
                     for post in vlm_posts
                 }
             else:
                 vlm_futures = {
-                    vlm_executor.submit(self._process_vlm_post, post): post
+                    vlm_executor.submit(self._process_vlm_post, post, post_image_mapping.get(post['id'], [])): post
                     for post in vlm_posts
                 }
 
@@ -498,12 +570,13 @@ class PostProcessor:
 
         return result
 
-    def _process_vlm_post(self, post: Dict[str, Any]) -> bool:
+    def _process_vlm_post(self, post: Dict[str, Any], validated_image_urls: List[str] = None) -> bool:
         """
-        处理需要VLM的帖子，包含图片验证和错误处理
+        处理需要VLM的帖子，使用预验证的图片URL
 
         Args:
             post: 帖子信息字典
+            validated_image_urls: 预验证的图片URL列表
 
         Returns:
             是否处理成功
@@ -515,11 +588,11 @@ class PostProcessor:
             self.logger.warning(f"VLM帖子{post_id}没有内容，跳过处理")
             return False
 
-        # 提取并验证图片URL
-        image_urls = extract_image_urls_from_markdown(post_text)
-
-        # 如果没有有效的图片URL，降级为纯文本处理
-        if not image_urls:
+        # 使用预验证的图片URL
+        if validated_image_urls:
+            image_urls = validated_image_urls
+        else:
+            # 如果没有预验证的URL，降级为纯文本处理
             self.logger.info(f"帖子{post_id}没有有效图片URL，降级为LLM处理")
             return self._process_llm_post(post)
 
@@ -576,12 +649,13 @@ class PostProcessor:
                 self.logger.error(f"保存错误状态失败: {save_error}")
             return False
 
-    def _process_vlm_post_with_stats(self, post: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_vlm_post_with_stats(self, post: Dict[str, Any], validated_image_urls: List[str] = None) -> Dict[str, Any]:
         """
         处理需要VLM的帖子，返回详细统计信息（Debug模式）
 
         Args:
             post: 帖子信息字典
+            validated_image_urls: 预验证的图片URL列表
 
         Returns:
             包含成功状态和详细信息的字典
@@ -599,11 +673,11 @@ class PostProcessor:
             self.logger.warning(f"VLM帖子{post_id}没有内容，跳过处理")
             return result
 
-        # 提取并验证图片URL
-        image_urls = extract_image_urls_from_markdown(post_text)
-
-        # 如果没有有效的图片URL，降级为纯文本处理
-        if not image_urls:
+        # 使用预验证的图片URL
+        if validated_image_urls:
+            image_urls = validated_image_urls
+        else:
+            # 如果没有预验证的URL，降级为纯文本处理
             self.logger.info(f"帖子{post_id}没有有效图片URL，降级为LLM处理")
             success = self._process_llm_post(post)
             result['success'] = success
