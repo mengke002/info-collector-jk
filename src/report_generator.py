@@ -92,7 +92,7 @@ class JKReportGenerator:
         return '\n'.join(processed_lines)
 
     def _format_posts_for_llm(self, posts: List[Dict[str, Any]], source_prefix: str = 'T') -> Tuple[str, List[Dict[str, Any]]]:
-        """将帖子格式化为带编号的Markdown文本,返回(文本, 源映射列表)"""
+        """将帖子格式化为带编号的Markdown文本，包含原始内容和解读信息，返回(文本, 源映射列表)"""
         lines: List[str] = []
         sources: List[Dict[str, Any]] = []
         total_chars = 0
@@ -106,18 +106,38 @@ class JKReportGenerator:
             pub = p.get('published_at')
             pub_str = pub.strftime('%Y-%m-%d %H:%M') if pub else ''
 
+            # 获取解读信息
+            interpretation_text = p.get('interpretation_text') or ''
+            interpretation_model = p.get('interpretation_model') or ''
+
             # 每条摘要截断,避免单条过长
             title_t = self._truncate(title, 140)
-            summary_t = self._truncate(summary, 1200)
+            summary_t = self._truncate(summary, 1500)
 
+            # 解读内容截断
+            interpretation_t = self._truncate(interpretation_text, 3000) if interpretation_text else ''
+
+            # 构建帖子块
             block = [
                 f"### [{sid}] {title_t}",
                 f"- 作者: {nickname}",
                 f"- 时间: {pub_str}",
                 f"- 链接: {link}",
-                f"- 摘要:\n{summary_t}",
-                ""
+                f"- 原始内容:\n{summary_t}"
             ]
+
+            # 如果有解读内容，添加解读部分
+            if interpretation_text:
+                block.extend([
+                    f"- AI深度解读 (模型: {interpretation_model}):\n{interpretation_t}"
+                ])
+            else:
+                block.extend([
+                    "- AI深度解读: 暂无"
+                ])
+
+            block.append("")  # 空行分隔
+
             block_text = "\n".join(block)
             if total_chars + len(block_text) > self.max_content_length:
                 self.logger.info(f"达到最大内容限制({self.max_content_length}),截断帖子列表于第 {idx-1} 条")
@@ -146,13 +166,14 @@ class JKReportGenerator:
     def _prompt_daily(self) -> str:
         return """# Role: 资深社区战略分析师\n
 # Context: \n
-你正在分析一个由技术专家、产品经理、投资人和创业者组成的精英社区——'即刻'在过去24小时内发布的帖子。你的任务是基于我提供的、已编号的原始讨论材料,撰写一份信息密度高、由浅入深、可读性强的洞察报告。\n
+你正在分析一个由技术专家、产品经理、投资人和创业者组成的精英社区——'即刻'在过去24小时内发布的帖子。你的任务是基于我提供的、已编号的原始讨论材料和AI深度解读,撰写一份信息密度高、由浅入深、可读性强的洞察报告。\n
 # Core Principles:\n
 1.  **忠于原文与可追溯性 (CRITICAL)**: 你的每一条摘要、洞察、趋势判断和建议,都必须在句末使用 `[Source: T_n]` 或 `[Sources: T_n, T_m]` 的格式明确标注信息来源。这是硬性要求,绝对不能遗漏。\n
 2.  **情境感知 (Context-Aware)**: 在分析时,请注意识别每个帖子所属的隐性"圈子"或话题分类（如`[AI/前沿技术]`, `[产品与设计]`, `[创业与投资]`, `[个人成长与思考]`, `[行业与市场动态]`, `[工具与工作流分享]`, `[社区与文化观察]`, `[日常与社交]`等）,这会影响你的分析视角和价值判断。\n
 3.  **由浅入深**: 报告结构必须从表层信息总结,逐步过渡到深层趋势和战略建议。\n
 # Input Data:\n
-# 原始帖子数据 (已编号):\n
+以下是即刻社区的帖子数据，每条帖子包含原始内容和AI深度解读（如有）。请综合利用原始内容和AI解读信息进行分析：\n
+# 帖子数据 (原始内容 + AI解读，已编号):\n
 {content}\n
 # Your Task:\n
 请严格按照以下四个层次的分析框架,生成一份完整的Markdown报告内容。\n

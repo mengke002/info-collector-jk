@@ -13,7 +13,7 @@ from src.logger import setup_logging
 from src.database import DatabaseManager
 from src.config import config
 from src.tasks import run_crawl_task, run_cleanup_task, run_stats_task
-from src.tasks import run_report_task
+from src.tasks import run_report_task, run_postprocess_task
 
 # Initialize logging
 logging_config = config.get_logging_config()
@@ -30,10 +30,10 @@ def get_beijing_time():
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='即刻爬虫系统 + 报告生成')
-    parser.add_argument('--task', choices=['crawl', 'cleanup', 'stats', 'report', 'full'],
+    parser = argparse.ArgumentParser(description='即刻爬虫系统 + 报告生成 + Post后处理')
+    parser.add_argument('--task', choices=['crawl', 'cleanup', 'stats', 'report', 'postprocess', 'full'],
                        default='crawl', help='要执行的任务类型')
-    parser.add_argument('--retention-days', type=int, 
+    parser.add_argument('--retention-days', type=int,
                        help='数据保留天数（仅用于cleanup任务）')
     parser.add_argument('--output', choices=['json', 'text'], default='text',
                        help='输出格式')
@@ -42,12 +42,12 @@ def main():
     # 报告任务参数
     parser.add_argument('--report-type', choices=['daily_hotspot','weekly_digest','kol_trajectory','quarterly_narrative'],
                        help='报告类型（用于 --task report）')
-    parser.add_argument('--hours-back', type=int, help='回溯小时数（用于daily）')
+    parser.add_argument('--hours-back', type=int, help='回溯小时数（用于daily或postprocess）')
     parser.add_argument('--days-back', type=int, help='回溯天数（用于weekly/quarterly/kol）')
     parser.add_argument('--kol-user-ids', type=str, help='KOL用户ID列表，逗号分隔（用于kol_trajectory）')
-    
+
     args = parser.parse_args()
-    
+
     print(f"即刻爬虫系统")
     print(f"执行时间: {get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"执行任务: {args.task}")
@@ -55,12 +55,12 @@ def main():
 
     # 初始化数据库管理器
     db_manager = DatabaseManager(config)
-    
+
     if args.recreate_db:
         print("正在删除并重新创建数据库表...")
         # TODO: 实现删除表的逻辑
         print("数据库表已重新创建。")
-    
+
     # 执行对应任务
     if args.task == 'crawl':
         result = run_crawl_task()
@@ -68,6 +68,8 @@ def main():
         result = run_cleanup_task(args.retention_days)
     elif args.task == 'stats':
         result = run_stats_task()
+    elif args.task == 'postprocess':
+        result = run_postprocess_task(args.hours_back)
     elif args.task == 'report':
         if not args.report_type:
             print('缺少 --report-type 参数')
@@ -86,13 +88,13 @@ def main():
     else:
         print(f"未知任务类型: {args.task}")
         sys.exit(1)
-    
+
     # 输出结果
     if args.output == 'json':
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
     else:
         print_result(result, args.task)
-    
+
     # 根据结果设置退出码
     if result.get('success', False):
         print("\n✅ 任务执行成功")
@@ -100,6 +102,7 @@ def main():
     else:
         print(f"\n❌ 任务执行失败: {result.get('error', '未知错误')}")
         sys.exit(1)
+
 
 
 def run_full_task():
@@ -159,6 +162,13 @@ def print_result(result: dict, task_type: str):
         print(f"   总用户数: {stats.get('total_profiles', 0)}")
         print(f"   总动态数: {stats.get('total_posts', 0)}")
         print(f"   今日新增: {stats.get('today_posts', 0)}")
+
+    elif task_type == 'postprocess':
+        print(f"✅ Post后处理任务完成")
+        print(f"   处理帖子: {result.get('total_posts', 0)} 条")
+        print(f"   成功处理: {result.get('processed_successfully', 0)} 条")
+        print(f"   处理失败: {result.get('failed_posts', 0)} 条")
+        print(f"   回溯时间: {result.get('hours_back', 0)} 小时")
 
     elif task_type == 'full':
         print(f"✅ 完整任务序列完成")

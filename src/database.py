@@ -128,6 +128,24 @@ class DatabaseManager:
                 COMMENT='即刻分析报告'
                 """
             ),
+            'postprocessing': (
+                """
+                CREATE TABLE IF NOT EXISTS postprocessing (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    post_id INT NOT NULL COMMENT '关联jk_posts表的主键',
+                    interpretation_text TEXT NOT NULL COMMENT 'LLM生成的完整解读内容',
+                    model_name VARCHAR(255) NOT NULL COMMENT '使用的模型名称',
+                    status ENUM('success', 'failed') NOT NULL DEFAULT 'success' COMMENT '处理状态',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '记录创建时间',
+                    UNIQUE KEY uniq_post_id (post_id),
+                    INDEX idx_status (status),
+                    INDEX idx_created_at (created_at),
+                    CONSTRAINT fk_postprocessing_post FOREIGN KEY (post_id)
+                        REFERENCES jk_posts(id) ON DELETE CASCADE
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                COMMENT='Post后处理解读结果表'
+                """
+            ),
         }
 
     def upsert_profiles(self, profiles: Sequence[Dict[str, Any]]) -> int:
@@ -250,32 +268,20 @@ class DatabaseManager:
                 """, (retention_days,))
                 conn.commit()
                 return cur.rowcount
-    
-    def get_posts_for_analysis(self, days: int = 7) -> List[Dict[str, Any]]:
-        """获取指定天数内的帖子用于分析"""
-        with self.get_connection() as conn:
-            with conn.cursor(pymysql.cursors.DictCursor) as cur:
-                cur.execute("""
-                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
-                           prof.nickname, prof.jike_user_id
-                    FROM jk_posts p
-                    JOIN jk_profiles prof ON p.profile_id = prof.id
-                    WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
-                    ORDER BY p.created_at DESC
-                    LIMIT 1000
-                """, (days,))
-                return cur.fetchall()
 
     def get_recent_posts(self, hours_back: int = 24, limit: int = 1500) -> List[Dict[str, Any]]:
-        """获取最近hours_back小时内新增的帖子"""
+        """获取最近hours_back小时内新增的帖子，包含解读信息"""
         with self.get_connection() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
                 cur.execute(
                     f"""
                     SELECT p.id, p.link, p.title, p.summary, p.published_at,
-                           prof.nickname, prof.jike_user_id
+                           prof.nickname, prof.jike_user_id,
+                           pp.interpretation_text, pp.model_name as interpretation_model,
+                           pp.status as interpretation_status
                     FROM jk_posts p
                     JOIN jk_profiles prof ON p.profile_id = prof.id
+                    LEFT JOIN postprocessing pp ON p.id = pp.post_id AND pp.status = 'success'
                     WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL %s HOUR)
                     ORDER BY p.created_at DESC
                     LIMIT {limit}
@@ -285,15 +291,18 @@ class DatabaseManager:
                 return cur.fetchall()
 
     def get_user_posts_for_analysis(self, jike_user_id: str, days: int = 30, limit: int = 2000) -> List[Dict[str, Any]]:
-        """获取指定用户在指定天数内的帖子用于分析"""
+        """获取指定用户在指定天数内的帖子用于分析，包含解读信息"""
         with self.get_connection() as conn:
             with conn.cursor(pymysql.cursors.DictCursor) as cur:
                 cur.execute(
                     f"""
                     SELECT p.id, p.link, p.title, p.summary, p.published_at,
-                           prof.nickname, prof.jike_user_id
+                           prof.nickname, prof.jike_user_id,
+                           pp.interpretation_text, pp.model_name as interpretation_model,
+                           pp.status as interpretation_status
                     FROM jk_posts p
                     JOIN jk_profiles prof ON p.profile_id = prof.id
+                    LEFT JOIN postprocessing pp ON p.id = pp.post_id AND pp.status = 'success'
                     WHERE prof.jike_user_id = %s
                       AND p.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
                     ORDER BY p.created_at DESC
@@ -319,3 +328,103 @@ class DatabaseManager:
                 cur.execute(sql, report_data)
                 conn.commit()
                 return cur.lastrowid
+
+    def get_unprocessed_posts(self, hours_back: int = 36) -> List[Dict[str, Any]]:
+        """获取未进行后处理的帖子，回溯指定小时数"""
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute("""
+                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
+                           prof.nickname, prof.jike_user_id
+                    FROM jk_posts p
+                    LEFT JOIN postprocessing pp ON p.id = pp.post_id
+                    JOIN jk_profiles prof ON p.profile_id = prof.id
+                    WHERE pp.post_id IS NULL
+                      AND p.created_at >= DATE_SUB(NOW(), INTERVAL %s HOUR)
+                    ORDER BY p.created_at DESC
+                    LIMIT 1000
+                """, (hours_back,))
+                return cur.fetchall()
+
+    def save_post_interpretation(self, post_id: int, interpretation_text: str, model_name: str, status: str = 'success') -> int:
+        """保存Post解读结果到postprocessing表"""
+        sql = """
+        INSERT INTO postprocessing (post_id, interpretation_text, model_name, status)
+        VALUES (%s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            interpretation_text = VALUES(interpretation_text),
+            model_name = VALUES(model_name),
+            status = VALUES(status),
+            created_at = CURRENT_TIMESTAMP
+        """
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (post_id, interpretation_text, model_name, status))
+                conn.commit()
+                return cur.lastrowid or cur.rowcount
+
+    def get_posts_with_interpretations(self, days: int = 7, limit: int = 1000) -> List[Dict[str, Any]]:
+        """获取包含解读信息的帖子，用于生成最终报告，兼容没有解读内容的情况"""
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute("""
+                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
+                           prof.nickname, prof.jike_user_id,
+                           pp.interpretation_text, pp.model_name as interpretation_model,
+                           pp.status as interpretation_status
+                    FROM jk_posts p
+                    JOIN jk_profiles prof ON p.profile_id = prof.id
+                    LEFT JOIN postprocessing pp ON p.id = pp.post_id AND pp.status = 'success'
+                    WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                    ORDER BY p.created_at DESC
+                    LIMIT %s
+                """, (days, limit))
+                return cur.fetchall()
+
+    def get_posts_for_analysis(self, days: int = 7) -> List[Dict[str, Any]]:
+        """获取指定天数内的帖子用于分析，兼容有无解读内容"""
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute("""
+                    SELECT p.id, p.link, p.title, p.summary, p.published_at,
+                           prof.nickname, prof.jike_user_id,
+                           pp.interpretation_text, pp.model_name as interpretation_model,
+                           pp.status as interpretation_status
+                    FROM jk_posts p
+                    JOIN jk_profiles prof ON p.profile_id = prof.id
+                    LEFT JOIN postprocessing pp ON p.id = pp.post_id AND pp.status = 'success'
+                    WHERE p.created_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                    ORDER BY p.created_at DESC
+                    LIMIT 1000
+                """, (days,))
+                return cur.fetchall()
+
+    def get_postprocessing_stats(self) -> Dict[str, int]:
+        """获取后处理统计信息"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                # 总处理数
+                cur.execute("SELECT COUNT(*) FROM postprocessing")
+                total_processed = cur.fetchone()[0]
+
+                # 成功处理数
+                cur.execute("SELECT COUNT(*) FROM postprocessing WHERE status = 'success'")
+                success_count = cur.fetchone()[0]
+
+                # 失败处理数
+                cur.execute("SELECT COUNT(*) FROM postprocessing WHERE status = 'failed'")
+                failed_count = cur.fetchone()[0]
+
+                # 今日处理数
+                cur.execute("""
+                    SELECT COUNT(*) FROM postprocessing
+                    WHERE DATE(created_at) = CURDATE()
+                """)
+                today_processed = cur.fetchone()[0]
+
+                return {
+                    'total_processed': total_processed,
+                    'success_count': success_count,
+                    'failed_count': failed_count,
+                    'today_processed': today_processed
+                }

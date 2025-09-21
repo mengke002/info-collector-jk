@@ -10,12 +10,14 @@ try:
     from .crawler import run as run_crawler
     from .database import DatabaseManager
     from .config import config
+    from .post_processor import run_post_processing
 except ImportError:
     # Fallback for direct script execution without package context
     from crawler import run as run_crawler  # type: ignore
     from database import DatabaseManager  # type: ignore
     from config import config  # type: ignore
-    
+    from post_processor import run_post_processing  # type: ignore
+
 # 按需导入报告生成器，避免无关任务触发其模块编译
 def _lazy_get_report_generator():
     try:
@@ -52,7 +54,7 @@ def run_cleanup_task(retention_days: int = None) -> Dict[str, Any]:
         db_manager = DatabaseManager(config)
         if retention_days is None:
             retention_days = config.get_data_retention_days()
-        
+
         deleted_count = db_manager.cleanup_old_posts(retention_days)
         result = {
             'success': True,
@@ -76,6 +78,11 @@ def run_stats_task() -> Dict[str, Any]:
         # 根据记忆中的经验，每个任务方法都必须包含db_manager.init_database()调用
         db_manager = DatabaseManager(config)
         stats = db_manager.get_profile_stats()
+
+        # 添加后处理统计信息
+        postprocessing_stats = db_manager.get_postprocessing_stats()
+        stats.update(postprocessing_stats)
+
         result = {
             'success': True,
             'stats': stats
@@ -90,31 +97,32 @@ def run_stats_task() -> Dict[str, Any]:
         }
 
 
-def run_report_task(report_type: str,
-                    hours_back: Optional[int] = None,
-                    days_back: Optional[int] = None,
-                    kol_user_ids: Optional[List[str]] = None) -> Dict[str, Any]:
-    """执行报告生成任务
-    report_type: daily_hotspot | weekly_digest | kol_trajectory | quarterly_narrative
-    """
-    logger.info(f"开始执行报告任务: {report_type}")
+def run_postprocess_task(hours_back: int = None) -> Dict[str, Any]:
+    """执行Post后处理任务"""
+    logger.info("开始执行Post后处理任务")
     try:
-        # 初始化数据库（确保表存在）
+        # 确保数据库表存在
         _ = DatabaseManager(config)
-        rg = get_report_generator()
-        if report_type == 'daily_hotspot':
-            return rg.generate_daily_hotspot(hours_back=hours_back)
-        elif report_type == 'weekly_digest':
-            return rg.generate_weekly_digest(days_back=days_back)
-        elif report_type == 'kol_trajectory':
-            return rg.generate_kol_trajectory(kol_ids=kol_user_ids, days_back=days_back)
-        elif report_type == 'quarterly_narrative':
-            return rg.generate_quarterly_narrative(days_back=days_back)
-        else:
-            return {'success': False, 'error': f'未知报告类型: {report_type}'}
+
+        if hours_back is None:
+            hours_back = 36  # 默认回溯36小时
+
+        result = run_post_processing(hours_back)
+
+        return {
+            'success': True,
+            'total_posts': result['total'],
+            'processed_successfully': result['success'],
+            'failed_posts': result['failed'],
+            'hours_back': hours_back
+        }
+
     except Exception as e:
-        logger.error(f"报告任务失败: {e}", exc_info=True)
-        return {'success': False, 'error': str(e)}
+        logger.error(f"Post后处理任务失败: {e}", exc_info=True)
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 
 def run_report_task(report_type: str,
@@ -152,11 +160,15 @@ if __name__ == '__main__':
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[logging.StreamHandler(sys.stdout)]
     )
-    
+
     print("=== 即刻爬取任务测试 ===")
     crawl_result = run_crawl_task()
     print(f"爬取结果: {crawl_result}")
-    
+
     print("\n=== 统计任务测试 ===")
     stats_result = run_stats_task()
     print(f"统计结果: {stats_result}")
+
+    print("\n=== Post后处理任务测试 ===")
+    postprocess_result = run_postprocess_task()
+    print(f"后处理结果: {postprocess_result}")

@@ -1,0 +1,65 @@
+name: Scheduled Post Interpretation
+
+on:
+  schedule:
+    # 北京时间9-22点每小时执行1次 (UTC时间1-14点)
+    - cron: '0 1-14 * * *'
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      hours_back:
+        description: '回溯小时数'
+        required: false
+        default: '36'
+        type: string
+
+jobs:
+  process_posts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Post Processing Script
+        env:
+          # LLM API配置
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
+          LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
+          LLM_SMART_MODEL_NAME: ${{ secrets.LLM_SMART_MODEL_NAME }}
+
+          # 数据库配置
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_SSL_MODE: ${{ secrets.DB_SSL_MODE }}
+
+          # 其他配置
+          EXECUTOR_MAX_WORKERS: ${{ secrets.EXECUTOR_MAX_WORKERS }}
+          EXECUTOR_FAST_LLM_WORKERS: ${{ secrets.EXECUTOR_FAST_LLM_WORKERS }}
+          EXECUTOR_FAST_VLM_WORKERS: ${{ secrets.EXECUTOR_FAST_VLM_WORKERS }}
+          LOGGING_LOG_LEVEL: ${{ secrets.LOGGING_LOG_LEVEL }}
+        run: |
+          HOURS_BACK="${{ github.event.inputs.hours_back || '36' }}"
+          python3.12 main.py --task postprocess --hours-back $HOURS_BACK
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: post-processing-logs
+          path: "*.log"
+          retention-days: 7

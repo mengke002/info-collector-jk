@@ -1,8 +1,8 @@
 """LLM客户端模块
-支持OpenAI compatible接口的streaming实现
+支持OpenAI compatible接口的streaming实现，包含VLM支持
 """
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from openai import OpenAI
 
 try:
@@ -13,104 +13,203 @@ except ImportError:
 
 
 class LLMClient:
-    """简化的LLM客户端，仅支持OpenAI compatible接口"""
-    
+    """统一的LLM客户端，支持文本和视觉多模态模型"""
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        
+
         # 从配置文件获取配置（按优先级：环境变量 > config.ini > 默认值）
         llm_config = config.get_llm_config()
         self.api_key = llm_config.get('openai_api_key')
-        self.model = llm_config.get('openai_model', 'gpt-3.5-turbo')
         self.base_url = llm_config.get('openai_base_url', 'https://api.openai.com/v1')
-        
+
+        # 获取不同类型的模型配置
+        self.fast_model = llm_config.get('fast_model_name', 'gpt-4.1')
+        self.vlm_model = llm_config.get('fast_vlm_name', 'gpt-4.1')
+        self.smart_model = llm_config.get('smart_model_name', 'gpt-4.1')
+
         if not self.api_key:
             raise ValueError("未找到OPENAI_API_KEY配置，请在环境变量或config.ini中设置")
-        
+
         # 初始化OpenAI客户端
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url
         )
-        
-        self.logger.info(f"LLM客户端初始化成功 - Model: {self.model}, Base URL: {self.base_url}")
-    
-    def analyze_content(self, content: str, prompt_template: str) -> Dict[str, Any]:
-        """使用streaming方式分析内容"""
+
+        self.logger.info(f"LLM客户端初始化成功")
+        self.logger.info(f"快速模型: {self.fast_model}")
+        self.logger.info(f"视觉模型: {self.vlm_model}")
+        self.logger.info(f"智能模型: {self.smart_model}")
+
+    def call_fast_model(self, prompt: str, temperature: float = 0.1) -> Dict[str, Any]:
+        """
+        调用快速模型进行信息提取
+        适用于：结构化信息提取、分类等快速任务
+        """
+        return self._make_request(prompt, self.fast_model, temperature)
+
+    def call_smart_model(self, prompt: str, temperature: float = 0.5) -> Dict[str, Any]:
+        """
+        调用智能模型进行深度分析
+        适用于：报告生成、深度洞察、综合分析等复杂任务
+        """
+        return self._make_request(prompt, self.smart_model, temperature)
+
+    def call_vlm(self, prompt: str, image_urls: List[str], temperature: float = 0.3) -> Dict[str, Any]:
+        """
+        调用视觉多模态模型进行图文分析
+
+        Args:
+            prompt: 文本提示词
+            image_urls: 图片URL列表
+            temperature: 生成温度
+
+        Returns:
+            响应结果字典
+        """
         try:
-            # 格式化提示词
-            prompt = prompt_template.format(content=content)
-            
-            # 调试输出：显示请求信息（仅在DEBUG级别显示详细内容）
-            self.logger.info("开始LLM内容分析...")
-            self.logger.debug("=== LLM 请求调试信息 ===")
-            self.logger.debug(f"模型: {self.model}")
-            self.logger.info(f"内容长度: {len(content)} 字符")
-            self.logger.debug(f"提示词长度: {len(prompt)} 字符")
-            self.logger.debug(f"内容预览: {content[:200]}...")
-            
+            self.logger.info(f"调用VLM模型: {self.vlm_model}")
+            self.logger.info(f"图片数量: {len(image_urls)}")
+            self.logger.info(f"提示词长度: {len(prompt)} 字符")
+
+            # 构建消息内容
+            content = [{"type": "text", "text": prompt}]
+
+            # 添加图片
+            for i, url in enumerate(image_urls):
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": url}
+                })
+                self.logger.debug(f"添加图片 {i+1}: {url}")
+
+            # 创建请求
+            response = self.client.chat.completions.create(
+                model=self.vlm_model,
+                messages=[{
+                    "role": "user",
+                    "content": content
+                }],
+                temperature=temperature,
+                stream=True
+            )
+
+            # 收集streaming响应
+            full_content = ""
+            chunk_count = 0
+
+            self.logger.info("开始处理VLM streaming响应...")
+
+            for chunk in response:
+                chunk_count += 1
+                delta = chunk.choices[0].delta
+                content_chunk = getattr(delta, 'content', None)
+
+                if content_chunk:
+                    full_content += content_chunk
+                    self.logger.debug(f"VLM Chunk {chunk_count}: {content_chunk[:50]}...")
+
+            self.logger.info(f"VLM调用完成 - 处理了 {chunk_count} 个chunks")
+            self.logger.info(f"响应内容长度: {len(full_content)} 字符")
+
+            return {
+                'success': True,
+                'content': full_content.strip(),
+                'model': self.vlm_model,
+                'provider': 'openai_compatible'
+            }
+
+        except Exception as e:
+            error_msg = f"VLM调用失败: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
+            return {
+                'success': False,
+                'error': error_msg,
+                'model': self.vlm_model
+            }
+
+    def _make_request(self, prompt: str, model_name: str, temperature: float) -> Dict[str, Any]:
+        """
+        执行具体的LLM请求，支持streaming
+
+        Args:
+            prompt: 提示词
+            model_name: 模型名称
+            temperature: 生成温度
+
+        Returns:
+            响应结果字典
+        """
+        try:
+            self.logger.info(f"调用LLM: {model_name}")
+            self.logger.info(f"提示词长度: {len(prompt)} 字符")
+
             # 创建streaming请求
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=model_name,
                 messages=[
                     {'role': 'system', 'content': '你是一个专业的内容分析师，擅长总结和提取关键信息。'},
                     {'role': 'user', 'content': prompt}
                 ],
-                temperature=0.3,
+                temperature=temperature,
                 stream=True
             )
-            
+
             # 收集所有streaming内容
             full_content = ""
             reasoning_content_full = ""
             chunk_count = 0
-            
+
             self.logger.info("开始streaming响应处理...")
-            
+
             for chunk in response:
                 chunk_count += 1
                 delta = chunk.choices[0].delta
-                
+
                 # 安全地获取reasoning_content和content
                 reasoning_content = getattr(delta, 'reasoning_content', None)
                 content_chunk = getattr(delta, 'content', None)
-                
+
                 if reasoning_content:
                     # 推理内容单独收集，但不加入最终结果
                     reasoning_content_full += reasoning_content
                     self.logger.debug(f"Chunk {chunk_count} - Reasoning: {reasoning_content[:50]}...")
-                
+
                 if content_chunk:
                     # 只收集最终的content内容
                     full_content += content_chunk
                     self.logger.debug(f"Chunk {chunk_count} - Content: {content_chunk[:50]}...")
-            
-            # 调试输出：显示响应结果（敏感信息仅在DEBUG级别显示）
-            self.logger.info("LLM分析完成")
-            self.logger.debug("=== LLM 响应调试信息 ===")
-            self.logger.info(f"处理了 {chunk_count} 个 chunks")
-            if reasoning_content_full:
-                self.logger.info(f"推理内容长度: {len(reasoning_content_full)} 字符")
-                self.logger.debug(f"推理内容预览: {reasoning_content_full[:200]}...")
-            self.logger.info(f"最终内容长度: {len(full_content)} 字符")
-            self.logger.info(f"最终内容预览: {full_content[:300]}...")
-            self.logger.debug("=== LLM 最终内容 ===")
-            self.logger.debug(full_content)
-            self.logger.debug("=== LLM 响应结束 ===")
-            
+
+            self.logger.info(f"LLM调用完成 - 处理了 {chunk_count} 个chunks")
+            self.logger.info(f"响应内容长度: {len(full_content)} 字符")
+
             return {
                 'success': True,
-                'content': full_content,
-                'provider': 'openai_compatible',
-                'model': self.model
+                'content': full_content.strip(),
+                'model': model_name,
+                'provider': 'openai_compatible'
             }
-            
+
         except Exception as e:
-            error_msg = f"LLM分析失败: {str(e)}"
+            error_msg = f"LLM调用失败: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
+            return {
+                'success': False,
+                'error': error_msg,
+                'model': model_name
+            }
+
+    def analyze_content(self, content: str, prompt_template: str) -> Dict[str, Any]:
+        """使用快速模型分析内容（保持向后兼容性）"""
+        try:
+            # 格式化提示词
+            prompt = prompt_template.format(content=content)
+            return self.call_fast_model(prompt)
+
+        except Exception as e:
+            error_msg = f"内容分析失败: {str(e)}"
             self.logger.error(error_msg)
-            self.logger.error(f"错误类型: {type(e).__name__}")
-            import traceback
-            self.logger.error(f"堆栈追踪: {traceback.format_exc()}")
             return {
                 'success': False,
                 'error': error_msg,

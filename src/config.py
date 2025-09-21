@@ -130,7 +130,9 @@ class Config:
     def get_executor_config(self) -> Dict[str, Any]:
         """获取执行器配置"""
         return {
-            'max_workers': self._get_config_value('executor', 'max_workers', 'EXECUTOR_MAX_WORKERS', 10, int)
+            'max_workers': self._get_config_value('executor', 'max_workers', 'EXECUTOR_MAX_WORKERS', 10, int),
+            'fast_llm_workers': self._get_config_value('executor', 'fast_llm_workers', 'EXECUTOR_FAST_LLM_WORKERS', 8, int),
+            'fast_vlm_workers': self._get_config_value('executor', 'fast_vlm_workers', 'EXECUTOR_FAST_VLM_WORKERS', 4, int)
         }
     
     def get_max_workers(self) -> int:
@@ -138,14 +140,56 @@ class Config:
         return self._get_config_value('executor', 'max_workers', 'EXECUTOR_MAX_WORKERS', 10, int)
 
     def get_llm_config(self) -> Dict[str, Any]:
-        """获取LLM配置，优先级：环境变量 > config.ini > 默认值。
-        与 info-collector-linuxdo 保持一致字段。
-        """
+        """获取LLM配置，优先级：环境变量 > config.ini > 默认值"""
+        # API密钥优先从环境变量获取，其次从 config.ini 获取
+        openai_api_key = self._get_config_value('llm', 'openai_api_key', 'OPENAI_API_KEY', None)
+        if not openai_api_key:
+            raise ValueError("OPENAI_API_KEY 未设置。请在环境变量或config.ini中设置LLM功能需要API密钥。")
+
         return {
-            'openai_api_key': self._get_config_value('llm', 'openai_api_key', 'OPENAI_API_KEY', None),
-            'openai_model': self._get_config_value('llm', 'openai_model', 'OPENAI_MODEL', 'gpt-3.5-turbo'),
+            # 快速模型配置
+            'fast_model_name': self._get_config_value('llm', 'fast_model_name', 'LLM_FAST_MODEL_NAME', 'gpt-4.1'),
+
+            # 视觉多模态模型配置
+            'fast_vlm_name': self._get_config_value('llm', 'fast_vlm_name', 'LLM_FAST_VLM_NAME', 'gpt-4.1'),
+
+            # 智能模型配置
+            'smart_model_name': self._get_config_value('llm', 'smart_model_name', 'LLM_SMART_MODEL_NAME', 'gpt-4.1'),
+
+            # API配置
+            'openai_api_key': openai_api_key,
             'openai_base_url': self._get_config_value('llm', 'openai_base_url', 'OPENAI_BASE_URL', 'https://api.openai.com/v1'),
-            'max_content_length': self._get_config_value('llm', 'max_content_length', 'LLM_MAX_CONTENT_LENGTH', 380000, int)
+            'max_content_length': self._get_config_value('llm', 'max_content_length', 'LLM_MAX_CONTENT_LENGTH', 380000, int),
+        }
+
+    def get_fast_model_config(self) -> Dict[str, str]:
+        """获取快速模型配置"""
+        llm_config = self.get_llm_config()
+        return {
+            'provider': 'openai',
+            'model_name': llm_config['fast_model_name'],
+            'api_key': llm_config['openai_api_key'],
+            'base_url': llm_config['openai_base_url']
+        }
+
+    def get_vlm_model_config(self) -> Dict[str, str]:
+        """获取视觉多模态模型配置"""
+        llm_config = self.get_llm_config()
+        return {
+            'provider': 'openai',
+            'model_name': llm_config['fast_vlm_name'],
+            'api_key': llm_config['openai_api_key'],
+            'base_url': llm_config['openai_base_url']
+        }
+
+    def get_smart_model_config(self) -> Dict[str, str]:
+        """获取智能模型配置"""
+        llm_config = self.get_llm_config()
+        return {
+            'provider': 'openai',
+            'model_name': llm_config['smart_model_name'],
+            'api_key': llm_config['openai_api_key'],
+            'base_url': llm_config['openai_base_url']
         }
 
     def get_analysis_config(self) -> Dict[str, Any]:
