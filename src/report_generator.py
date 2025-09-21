@@ -304,7 +304,7 @@ class JKReportGenerator:
         )
 
     # ---------- 报告生成 ----------
-    def _analyze_with_llm(self, content: str, prompt_template: str) -> Optional[str]:
+    def _analyze_with_llm(self, content: str, prompt_template: str) -> Optional[Dict[str, Any]]:
         """调用智能模型进行深度分析，失败时返回None"""
         try:
             if llm_client is None:
@@ -314,7 +314,7 @@ class JKReportGenerator:
             # 使用智能模型进行复杂报告生成任务
             res = llm_client.call_smart_model(prompt)
             if isinstance(res, dict) and res.get('success'):
-                return str(res.get('content') or '')
+                return res
             return None
         except Exception as e:  # 兜底，避免影响主流程
             self.logger.warning(f"智能模型分析失败，将回退本地报告: {e}")
@@ -359,12 +359,13 @@ class JKReportGenerator:
 
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
         prompt = self._prompt_daily()
-        llm_output = self._analyze_with_llm(content_md, prompt)
+        llm_analysis_result = self._analyze_with_llm(content_md, prompt)
 
-        if not llm_output:
+        if not llm_analysis_result:
             header = "# 即刻24小时热点追踪器 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
+            llm_output = llm_analysis_result.get('content', '')
             # 为LLM生成的报告添加标准头部信息
             beijing_time = self._bj_time()
             header_info = [
@@ -383,7 +384,24 @@ class JKReportGenerator:
             # 清理LLM输出中可能的格式问题
             cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
 
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
+            sources_section = self._render_sources_section(sources)
+
+            # 构建报告尾部
+            footer_lines = ["", "---", ""]
+            provider = llm_analysis_result.get('provider')
+            model = llm_analysis_result.get('model')
+            if provider:
+                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+            
+            footer_lines.extend([
+                "",
+                f"📊 **统计摘要**: 本报告分析了 {len(posts)} 条动态",
+                "",
+                "*本报告由AI自动生成，仅供参考*"
+            ])
+            footer_section = "\n".join(footer_lines)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
 
         title = f"即刻24h热点观察 - {end_time.strftime('%Y-%m-%d %H:%M')}"
         report_row = {
@@ -454,11 +472,12 @@ class JKReportGenerator:
             return {'success': False, 'error': f'最近{days}天内无动态可分析'}
 
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
-        llm_output = self._analyze_with_llm(content_md, self._prompt_weekly())
-        if not llm_output:
+        llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly())
+        if not llm_analysis_result:
             header = "# 即刻周度社群洞察 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
+            llm_output = llm_analysis_result.get('content', '')
             # 为LLM生成的报告添加标准头部信息
             beijing_time = self._bj_time()
             header_info = [
@@ -477,7 +496,22 @@ class JKReportGenerator:
             # 清理LLM输出中可能的格式问题
             cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
 
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
+            sources_section = self._render_sources_section(sources)
+
+            # 构建报告尾部
+            footer_lines = ["", "---", ""]
+            provider = llm_analysis_result.get('provider')
+            model = llm_analysis_result.get('model')
+            if provider:
+                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+            
+            footer_lines.extend([
+                "",
+                "*本报告由AI自动生成，仅供参考*"
+            ])
+            footer_section = "\n".join(footer_lines)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
 
         title = f"即刻周度社群洞察 - 截止 {end_time.strftime('%Y-%m-%d')}"
         report_row = {
@@ -548,11 +582,12 @@ class JKReportGenerator:
 
         # 复用周报提示词，实际可更复杂
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
-        llm_output = self._analyze_with_llm(content_md, self._prompt_weekly())
-        if not llm_output:
+        llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly())
+        if not llm_analysis_result:
             header = "# 即刻季度战略叙事 (占位版)"
             report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
         else:
+            llm_output = llm_analysis_result.get('content', '')
             # 为LLM生成的报告添加标准头部信息
             beijing_time = self._bj_time()
             q = (end_time.month - 1) // 3 + 1
@@ -572,7 +607,22 @@ class JKReportGenerator:
             # 清理LLM输出中可能的格式问题
             cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
 
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
+            sources_section = self._render_sources_section(sources)
+
+            # 构建报告尾部
+            footer_lines = ["", "---", ""]
+            provider = llm_analysis_result.get('provider')
+            model = llm_analysis_result.get('model')
+            if provider:
+                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+            
+            footer_lines.extend([
+                "",
+                "*本报告由AI自动生成，仅供参考*"
+            ])
+            footer_section = "\n".join(footer_lines)
+
+            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
 
         # 简单季度标题
         q = (end_time.month - 1) // 3 + 1
@@ -654,11 +704,12 @@ class JKReportGenerator:
                 return False
             content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
             # 暂复用周报提示词
-            llm_output = self._analyze_with_llm(content_md, self._prompt_weekly())
-            if not llm_output:
+            llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly())
+            if not llm_analysis_result:
                 header = f"# 即刻KOL思想轨迹 (占位版) - {uid}"
                 report_content = self._make_fallback_report(header, posts, start_time_global, end_time_global, sources)
             else:
+                llm_output = llm_analysis_result.get('content', '')
                 # 为LLM生成的报告添加标准头部信息
                 beijing_time = self._bj_time()
                 header_info = [
@@ -677,7 +728,22 @@ class JKReportGenerator:
                 # 清理LLM输出中可能的格式问题
                 cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
 
-                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + self._render_sources_section(sources)
+                sources_section = self._render_sources_section(sources)
+
+                # 构建报告尾部
+                footer_lines = ["", "---", ""]
+                provider = llm_analysis_result.get('provider')
+                model = llm_analysis_result.get('model')
+                if provider:
+                    footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+                
+                footer_lines.extend([
+                    "",
+                    "*本报告由AI自动生成，仅供参考*"
+                ])
+                footer_section = "\n".join(footer_lines)
+
+                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
 
             title = f"KOL思想轨迹 - {uid} - 截止 {end_time_global.strftime('%Y-%m-%d')}"
             row = {

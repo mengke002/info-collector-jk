@@ -388,6 +388,19 @@ def download_and_convert_image(url: str, target_format: str = 'PNG', timeout: in
                 elif img.mode not in ('RGB', 'L'):
                     img = img.convert('RGB')
 
+                # 图片尺寸压缩：限制在960p以内，避免超出VLM模型上下文
+                max_dimension = 1024  # 设置最大边长为1024像素，相当于960p水平
+                width, height = img.size
+                if width > max_dimension or height > max_dimension:
+                    # 计算缩放比例，保持长宽比
+                    scale_ratio = min(max_dimension / width, max_dimension / height)
+                    new_width = int(width * scale_ratio)
+                    new_height = int(height * scale_ratio)
+
+                    # 使用高质量的重采样算法
+                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    logger.debug(f"图片尺寸压缩: {width}x{height} -> {new_width}x{new_height} (压缩比: {scale_ratio:.2f})")
+
                 # 保存为目标格式的临时文件
                 with tempfile.NamedTemporaryFile(suffix=f'.{target_format.lower()}', delete=False) as converted_file:
                     converted_path = converted_file.name
