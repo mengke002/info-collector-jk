@@ -254,16 +254,19 @@ class JKReportGenerator:
 
     # ---------- 报告生成 ----------
     def _analyze_with_llm(self, content: str, prompt_template: str) -> Optional[str]:
-        """调用LLM进行分析，失败时返回None"""
+        """调用智能模型进行深度分析，失败时返回None"""
         try:
             if llm_client is None:
                 return None
-            res = llm_client.analyze_content(content=content, prompt_template=prompt_template)
+            # 格式化提示词
+            prompt = prompt_template.format(content=content)
+            # 使用智能模型进行复杂报告生成任务
+            res = llm_client.call_smart_model(prompt)
             if isinstance(res, dict) and res.get('success'):
                 return str(res.get('content') or '')
             return None
         except Exception as e:  # 兜底，避免影响主流程
-            self.logger.warning(f"LLM分析失败，将回退本地报告: {e}")
+            self.logger.warning(f"智能模型分析失败，将回退本地报告: {e}")
             return None
 
     def _make_fallback_report(

@@ -57,47 +57,73 @@ class LLMClient:
         """
         return self._make_request(prompt, self.smart_model, temperature)
 
-    def call_vlm(self, prompt: str, image_urls: List[str], temperature: float = 0.3, max_retries: int = 3) -> Dict[str, Any]:
+    def call_vlm(self, prompt: str, image_data_list: List[Dict[str, Any]], temperature: float = 0.3, max_retries: int = 3) -> Dict[str, Any]:
         """
-        调用视觉多模态模型进行图文分析，包含重试机制
+        调用视觉多模态模型进行图文分析，支持混合模式
+        支持URL和base64格式的混合输入
 
         Args:
             prompt: 文本提示词
-            image_urls: 图片URL列表
+            image_data_list: 图片数据列表，每个元素为{'type': 'url'/'base64', 'data': url/base64_str, 'url': original_url}
             temperature: 生成温度
             max_retries: 最大重试次数
 
         Returns:
             响应结果字典
         """
-        if not image_urls:
+        if not image_data_list:
             return {
                 'success': False,
-                'error': '没有提供图片URL',
+                'error': '没有提供图片数据',
                 'model': self.vlm_model
             }
 
-        # 验证图片URL数量限制
-        if len(image_urls) > 10:  # 大多数VLM API都有图片数量限制
-            self.logger.warning(f"图片数量过多({len(image_urls)})，截取前10张")
-            image_urls = image_urls[:10]
+        # 过滤出成功的图片数据
+        valid_images = [img for img in image_data_list if img.get('success', False) and img.get('data')]
+
+        if not valid_images:
+            return {
+                'success': False,
+                'error': '没有有效的图片数据',
+                'model': self.vlm_model
+            }
+
+        # 验证图片数量限制
+        if len(valid_images) > 10:  # 大多数VLM API都有图片数量限制
+            self.logger.warning(f"图片数量过多({len(valid_images)})，截取前10张")
+            valid_images = valid_images[:10]
 
         for attempt in range(max_retries):
             try:
                 self.logger.info(f"调用VLM模型: {self.vlm_model} (尝试 {attempt + 1}/{max_retries})")
-                self.logger.info(f"图片数量: {len(image_urls)}")
+                self.logger.info(f"图片数量: {len(valid_images)}")
                 self.logger.info(f"提示词长度: {len(prompt)} 字符")
 
                 # 构建消息内容
                 content = [{"type": "text", "text": prompt}]
 
-                # 添加图片
-                for i, url in enumerate(image_urls):
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": url}
-                    })
-                    self.logger.debug(f"添加图片 {i+1}: {url}")
+                # 添加图片（支持混合模式）
+                for i, img_data in enumerate(valid_images):
+                    img_type = img_data.get('type')
+                    img_value = img_data.get('data')
+                    original_url = img_data.get('url', '')
+
+                    if img_type == 'url':
+                        # 标准格式保持URL
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": img_value}
+                        })
+                        self.logger.debug(f"添加图片 {i+1}: 标准格式URL(PNG/JPG/JPEG) - {img_value[:50]}...")
+                    elif img_type == 'base64':
+                        # 其他格式使用base64
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{img_value}"
+                            }
+                        })
+                        self.logger.debug(f"添加图片 {i+1}: 转换为PNG的base64 - 来源{original_url[:50]}... (base64长度: {len(img_value)})")
 
                 # 创建请求
                 response = self.client.chat.completions.create(

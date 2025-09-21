@@ -5,3 +5,4 @@ pymysql>=1.1.0
 python-dotenv>=1.0.0
 markdownify>=0.11.6
 openai>=1.40.0
+pillow>=10.0.0
