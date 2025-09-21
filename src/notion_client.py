@@ -384,6 +384,124 @@ class JikeNotionClient:
 
         return rich_text
 
+    def _parse_list_items(self, lines: List[str], start_index: int) -> tuple[List[Dict], int]:
+        """解析嵌套列表项，返回块列表和处理的行数"""
+        blocks = []
+        i = start_index
+
+        while i < len(lines):
+            line = lines[i]
+            stripped_line = line.lstrip()
+
+            # 如果不是列表项，结束解析
+            if not stripped_line.startswith(('- ', '* ')):
+                break
+
+            # 如果是空行，跳过
+            if not stripped_line:
+                i += 1
+                continue
+
+            # 计算缩进级别 - 支持2空格或4空格缩进
+            leading_spaces = len(line) - len(stripped_line)
+            indent_level = 0
+            if leading_spaces >= 4:
+                indent_level = leading_spaces // 4  # 4空格为一级
+            elif leading_spaces >= 2:
+                indent_level = leading_spaces // 2  # 2空格为一级
+
+            # 移除列表标记
+            list_content = stripped_line[2:]  # 移除 '- ' 或 '* '
+
+            # 如果这是一个顶级项（缩进级别为0），则处理它及其所有子项
+            if indent_level == 0:
+                # 创建列表项块
+                list_item = {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": self._parse_rich_text(list_content)
+                    }
+                }
+
+                # 查找子项
+                children, lines_processed = self._parse_nested_children(lines, i + 1, indent_level)
+                if children:
+                    list_item["bulleted_list_item"]["children"] = children
+
+                blocks.append(list_item)
+                i += 1 + lines_processed  # 当前行 + 处理的子项行数
+
+            else:
+                # 如果这是嵌套项但没有父项，将其作为顶级项处理
+                list_item = {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": self._parse_rich_text(list_content)
+                    }
+                }
+                blocks.append(list_item)
+                i += 1
+
+        processed_lines = i - start_index
+        return blocks, processed_lines
+
+    def _parse_nested_children(self, lines: List[str], start_index: int, parent_indent: int) -> tuple[List[Dict], int]:
+        """解析嵌套的子项"""
+        children = []
+        i = start_index
+
+        while i < len(lines):
+            line = lines[i]
+            stripped_line = line.lstrip()
+
+            # 空行跳过
+            if not stripped_line:
+                i += 1
+                continue
+
+            # 如果不是列表项，结束解析
+            if not stripped_line.startswith(('- ', '* ')):
+                break
+
+            # 计算缩进级别
+            leading_spaces = len(line) - len(stripped_line)
+            indent_level = 0
+            if leading_spaces >= 4:
+                indent_level = leading_spaces // 4
+            elif leading_spaces >= 2:
+                indent_level = leading_spaces // 2
+
+            # 如果缩进级别小于等于父级，不是子项
+            if indent_level <= parent_indent:
+                break
+
+            # 如果是直接子项（缩进刚好多一级）
+            if indent_level == parent_indent + 1:
+                child_content = stripped_line[2:]  # 移除 '- ' 或 '* '
+                child_item = {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {
+                        "rich_text": self._parse_rich_text(child_content)
+                    }
+                }
+
+                # 递归查找孙子项
+                grandchildren, child_lines_processed = self._parse_nested_children(lines, i + 1, indent_level)
+                if grandchildren:
+                    child_item["bulleted_list_item"]["children"] = grandchildren
+
+                children.append(child_item)
+                i += 1 + child_lines_processed  # 当前行 + 处理的孙子项行数
+            else:
+                # 跳过更深层的嵌套（已经在递归中处理）
+                i += 1
+
+        processed_lines = i - start_index
+        return children, processed_lines
+
     def markdown_to_notion_blocks(self, markdown_content: str) -> List[Dict]:
         """将Markdown内容转换为Notion块，支持链接和格式"""
         blocks = []
@@ -432,40 +550,10 @@ class JikeNotionClient:
                     })
                 # 列表项 - 支持多层嵌套
                 elif line.startswith(('- ', '* ')) or (line.startswith(' ') and line.lstrip().startswith(('- ', '* '))):
-                    # 计算缩进级别
-                    indent_level = 0
-                    stripped_line = line.lstrip()
-
-                    # 计算前导空格数来确定层级
-                    leading_spaces = len(line) - len(stripped_line)
-                    if leading_spaces > 0:
-                        indent_level = min(leading_spaces // 2, 2)  # Notion最多支持3级嵌套(0,1,2)
-
-                    # 移除列表标记
-                    list_content = stripped_line[2:]  # 移除 '- ' 或 '* '
-
-                    if indent_level == 0:
-                        # 顶级列表项
-                        blocks.append({
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": self._parse_rich_text(list_content)
-                            }
-                        })
-                    else:
-                        # 嵌套列表项 - 通过children实现
-                        # 但由于Notion API的限制，我们先转换为包含缩进标记的普通列表项
-                        indent_marker = "  " * indent_level + "• "
-                        formatted_content = indent_marker + list_content
-
-                        blocks.append({
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": self._parse_rich_text(formatted_content)
-                            }
-                        })
+                    # 处理列表项，支持嵌套结构
+                    list_blocks, skip_lines = self._parse_list_items(lines, i)
+                    blocks.extend(list_blocks)
+                    i += skip_lines - 1  # -1 因为外层循环会+1
                 # 普通段落
                 else:
                     # 处理可能的多行段落
