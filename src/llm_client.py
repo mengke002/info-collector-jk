@@ -43,19 +43,19 @@ class LLMClient:
         self.logger.info(f"视觉模型: {self.vlm_model}")
         self.logger.info(f"智能模型: {self.smart_model}")
 
-    def call_fast_model(self, prompt: str, temperature: float = 0.1) -> Dict[str, Any]:
+    def call_fast_model(self, prompt: str, temperature: float = 0.1, max_retries: int = 3) -> Dict[str, Any]:
         """
         调用快速模型进行信息提取
         适用于：结构化信息提取、分类等快速任务
         """
-        return self._make_request(prompt, self.fast_model, temperature)
+        return self._make_request(prompt, self.fast_model, temperature, max_retries)
 
-    def call_smart_model(self, prompt: str, temperature: float = 0.5) -> Dict[str, Any]:
+    def call_smart_model(self, prompt: str, temperature: float = 0.5, max_retries: int = 3) -> Dict[str, Any]:
         """
         调用智能模型进行深度分析
         适用于：报告生成、深度洞察、综合分析等复杂任务
         """
-        return self._make_request(prompt, self.smart_model, temperature)
+        return self._make_request(prompt, self.smart_model, temperature, max_retries)
 
     def call_vlm(self, prompt: str, image_data_list: List[Dict[str, Any]], temperature: float = 0.3, max_retries: int = 3) -> Dict[str, Any]:
         """
@@ -195,76 +195,103 @@ class LLMClient:
                         'total_attempts': max_retries
                     }
 
-    def _make_request(self, prompt: str, model_name: str, temperature: float) -> Dict[str, Any]:
+    def _make_request(self, prompt: str, model_name: str, temperature: float, max_retries: int = 3) -> Dict[str, Any]:
         """
-        执行具体的LLM请求，支持streaming
+        执行具体的LLM请求，支持streaming和重试机制
 
         Args:
             prompt: 提示词
             model_name: 模型名称
             temperature: 生成温度
+            max_retries: 最大重试次数
 
         Returns:
             响应结果字典
         """
-        try:
-            self.logger.info(f"调用LLM: {model_name}")
-            self.logger.info(f"提示词长度: {len(prompt)} 字符")
+        for attempt in range(max_retries):
+            try:
+                self.logger.info(f"调用LLM: {model_name} (尝试 {attempt + 1}/{max_retries})")
+                self.logger.info(f"提示词长度: {len(prompt)} 字符")
 
-            # 创建streaming请求
-            response = self.client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {'role': 'system', 'content': '你是一个专业的内容分析师，擅长总结和提取关键信息。'},
-                    {'role': 'user', 'content': prompt}
-                ],
-                temperature=temperature,
-                stream=True
-            )
+                # 创建streaming请求
+                response = self.client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {'role': 'system', 'content': '你是一个专业的内容分析师，擅长总结和提取关键信息。'},
+                        {'role': 'user', 'content': prompt}
+                    ],
+                    temperature=temperature,
+                    stream=True
+                )
 
-            # 收集所有streaming内容
-            full_content = ""
-            reasoning_content_full = ""
-            chunk_count = 0
+                # 收集所有streaming内容
+                full_content = ""
+                reasoning_content_full = ""
+                chunk_count = 0
 
-            self.logger.info("开始streaming响应处理...")
+                self.logger.info("开始streaming响应处理...")
 
-            for chunk in response:
-                chunk_count += 1
-                delta = chunk.choices[0].delta
+                for chunk in response:
+                    chunk_count += 1
 
-                # 安全地获取reasoning_content和content
-                reasoning_content = getattr(delta, 'reasoning_content', None)
-                content_chunk = getattr(delta, 'content', None)
+                    # 安全检查chunk结构
+                    if not hasattr(chunk, 'choices') or not chunk.choices:
+                        self.logger.debug(f"跳过空chunk {chunk_count}")
+                        continue
 
-                if reasoning_content:
-                    # 推理内容单独收集，但不加入最终结果
-                    reasoning_content_full += reasoning_content
-                    self.logger.debug(f"Chunk {chunk_count} - Reasoning: {reasoning_content[:50]}...")
+                    if len(chunk.choices) == 0:
+                        self.logger.debug(f"跳过没有choices的chunk {chunk_count}")
+                        continue
 
-                if content_chunk:
-                    # 只收集最终的content内容
-                    full_content += content_chunk
-                    self.logger.debug(f"Chunk {chunk_count} - Content: {content_chunk[:50]}...")
+                    delta = chunk.choices[0].delta
 
-            self.logger.info(f"LLM调用完成 - 处理了 {chunk_count} 个chunks")
-            self.logger.info(f"响应内容长度: {len(full_content)} 字符")
+                    # 安全地获取reasoning_content和content
+                    reasoning_content = getattr(delta, 'reasoning_content', None)
+                    content_chunk = getattr(delta, 'content', None)
 
-            return {
-                'success': True,
-                'content': full_content.strip(),
-                'model': model_name,
-                'provider': 'openai_compatible'
-            }
+                    if reasoning_content:
+                        # 推理内容单独收集，但不加入最终结果
+                        reasoning_content_full += reasoning_content
+                        self.logger.debug(f"Chunk {chunk_count} - Reasoning: {reasoning_content[:50]}...")
 
-        except Exception as e:
-            error_msg = f"LLM调用失败: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
-            return {
-                'success': False,
-                'error': error_msg,
-                'model': model_name
-            }
+                    if content_chunk:
+                        # 只收集最终的content内容
+                        full_content += content_chunk
+                        self.logger.debug(f"Chunk {chunk_count} - Content: {content_chunk[:50]}...")
+
+                self.logger.info(f"LLM调用完成 - 处理了 {chunk_count} 个chunks")
+                self.logger.info(f"响应内容长度: {len(full_content)} 字符")
+
+                # 检查响应内容是否为空
+                if not full_content.strip():
+                    raise ValueError("LLM返回空响应")
+
+                return {
+                    'success': True,
+                    'content': full_content.strip(),
+                    'model': model_name,
+                    'provider': 'openai_compatible',
+                    'attempt': attempt + 1
+                }
+
+            except Exception as e:
+                error_msg = f"LLM调用失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}"
+                self.logger.error(error_msg)
+
+                # 如果是最后一次尝试，记录详细错误信息并返回失败
+                if attempt == max_retries - 1:
+                    self.logger.error(error_msg, exc_info=True)
+                    return {
+                        'success': False,
+                        'error': error_msg,
+                        'model': model_name,
+                        'total_attempts': max_retries
+                    }
+                else:
+                    # 等待后重试
+                    wait_time = (attempt + 1) * 2  # 递增等待时间: 2, 4, 6秒
+                    self.logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
 
     def analyze_content(self, content: str, prompt_template: str) -> Dict[str, Any]:
         """使用快速模型分析内容（保持向后兼容性）"""

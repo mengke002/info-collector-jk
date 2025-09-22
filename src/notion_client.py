@@ -590,25 +590,138 @@ class JikeNotionClient:
 
         return blocks
 
+    def _validate_and_fix_content_blocks(self, blocks: List[Dict]) -> List[Dict]:
+        """验证并修复内容块，处理长度超限问题"""
+        validated_blocks = []
+
+        for i, block in enumerate(blocks):
+            try:
+                block_type = block.get("type")
+
+                # 处理包含rich_text的块类型
+                if block_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
+                    fixed_block = self._fix_rich_text_content(block, i + 1)
+                    if fixed_block:
+                        validated_blocks.append(fixed_block)
+                else:
+                    # 其他类型的块直接添加
+                    validated_blocks.append(block)
+
+            except Exception as e:
+                self.logger.warning(f"验证块{i+1}时出错，跳过: {e}")
+                continue
+
+        return validated_blocks
+
+    def _fix_rich_text_content(self, block: Dict, block_index: int) -> Optional[Dict]:
+        """修复单个块的rich_text内容长度问题"""
+        try:
+            block_type = block["type"]
+            rich_text_list = block[block_type].get("rich_text", [])
+
+            if not rich_text_list:
+                return block
+
+            fixed_rich_text = []
+
+            for text_item in rich_text_list:
+                if not text_item.get("text", {}).get("content"):
+                    fixed_rich_text.append(text_item)
+                    continue
+
+                content = text_item["text"]["content"]
+
+                # 如果内容长度超过限制，需要分割
+                if len(content) > 2000:
+                    self.logger.debug(f"块{block_index}内容超长({len(content)}字符)，开始分割")
+
+                    # 将长内容分割成多个2000字符以内的片段
+                    chunks = self._split_content_smartly(content, 1950)  # 留一些余量
+
+                    for j, chunk in enumerate(chunks):
+                        chunk_item = text_item.copy()
+                        chunk_item["text"] = chunk_item["text"].copy()
+                        chunk_item["text"]["content"] = chunk
+
+                        if j == len(chunks) - 1 and len(chunks) > 1:
+                            # 最后一个分片，添加提示
+                            chunk_item["text"]["content"] += " ..."
+
+                        fixed_rich_text.append(chunk_item)
+
+                    self.logger.debug(f"块{block_index}分割为{len(chunks)}个片段")
+                else:
+                    fixed_rich_text.append(text_item)
+
+            # 更新块的rich_text
+            block[block_type]["rich_text"] = fixed_rich_text
+            return block
+
+        except Exception as e:
+            self.logger.warning(f"修复块{block_index}的rich_text时出错: {e}")
+            return block
+
+    def _split_content_smartly(self, content: str, max_length: int) -> List[str]:
+        """智能分割内容，尽量在句号、换行等位置分割"""
+        if len(content) <= max_length:
+            return [content]
+
+        chunks = []
+        current_pos = 0
+
+        while current_pos < len(content):
+            # 计算当前块的结束位置
+            end_pos = min(current_pos + max_length, len(content))
+
+            if end_pos == len(content):
+                # 最后一块
+                chunks.append(content[current_pos:end_pos])
+                break
+
+            # 尝试在合适的位置分割
+            chunk_content = content[current_pos:end_pos]
+
+            # 查找分割点的优先级：句号 > 换行 > 逗号 > 空格
+            split_chars = ['。', '\n', '，', '、', ' ']
+            split_pos = -1
+
+            for char in split_chars:
+                pos = chunk_content.rfind(char)
+                if pos > max_length * 0.7:  # 至少要用到70%的长度才分割
+                    split_pos = pos + 1
+                    break
+
+            if split_pos > 0:
+                # 找到了合适的分割点
+                chunks.append(content[current_pos:current_pos + split_pos])
+                current_pos += split_pos
+            else:
+                # 没有找到合适的分割点，强制分割
+                chunks.append(chunk_content)
+                current_pos = end_pos
+
+        return chunks
+
     def _create_large_content_page(self, parent_page_id: str, page_title: str,
                                   content_blocks: List[Dict]) -> Dict[str, Any]:
         """创建大内容页面，分批添加内容块"""
         try:
             self.logger.info(f"创建大内容页面，总共 {len(content_blocks)} 个块，需要分批处理")
 
-            # 第一步：创建空页面，只包含前100个块
-            initial_blocks = content_blocks[:100]
+            # 第一步：创建空页面，只包含前50个块（减少初始块数量）
+            initial_batch_size = 50
+            initial_blocks = content_blocks[:initial_batch_size]
             create_result = self.create_page(parent_page_id, page_title, initial_blocks)
 
             if not create_result.get("success"):
                 return create_result
 
             page_id = create_result["data"]["id"]
-            self.logger.info(f"页面创建成功，开始添加剩余 {len(content_blocks) - 100} 个块")
+            self.logger.info(f"页面创建成功，开始添加剩余 {len(content_blocks) - initial_batch_size} 个块")
 
             # 第二步：分批添加剩余的块
-            remaining_blocks = content_blocks[100:]
-            batch_size = 100
+            remaining_blocks = content_blocks[initial_batch_size:]
+            batch_size = 50  # 减少每批的块数量
 
             for i in range(0, len(remaining_blocks), batch_size):
                 batch = remaining_blocks[i:i + batch_size]
@@ -616,8 +729,8 @@ class JikeNotionClient:
 
                 self.logger.info(f"添加第 {batch_num} 批内容: {len(batch)} 个块")
 
-                # 使用 PATCH 方法添加子块
-                append_result = self._append_blocks_to_page(page_id, batch)
+                # 使用 PATCH 方法添加子块，增加重试机制
+                append_result = self._append_blocks_to_page_with_retry(page_id, batch, max_retries=3)
 
                 if not append_result.get("success"):
                     self.logger.warning(f"第 {batch_num} 批内容添加失败: {append_result.get('error')}")
@@ -625,9 +738,9 @@ class JikeNotionClient:
                 else:
                     self.logger.info(f"第 {batch_num} 批内容添加成功")
 
-                # 添加延迟避免API限制
+                # 增加延迟避免API限制
                 import time
-                time.sleep(0.5)
+                time.sleep(1.0)  # 增加等待时间
 
             page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
             return {
@@ -640,6 +753,82 @@ class JikeNotionClient:
         except Exception as e:
             self.logger.error(f"创建大内容页面时出错: {e}")
             return {"success": False, "error": str(e)}
+
+    def _append_blocks_to_page_with_retry(self, page_id: str, blocks: List[Dict], max_retries: int = 3) -> Dict[str, Any]:
+        """向页面追加内容块，带重试机制"""
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                self.logger.debug(f"尝试追加{len(blocks)}个块 (尝试 {attempt + 1}/{max_retries})")
+
+                # 在每次尝试前验证块内容
+                validated_blocks = self._validate_and_fix_content_blocks(blocks)
+
+                result = self._append_blocks_to_page(page_id, validated_blocks)
+
+                if result.get("success"):
+                    return result
+                else:
+                    error_msg = result.get("error", "未知错误")
+                    self.logger.warning(f"追加块失败 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+
+                    # 如果是内容验证错误，尝试进一步分割
+                    if "content.length should be" in error_msg or "2000" in error_msg:
+                        self.logger.info("检测到内容长度问题，尝试进一步分割内容")
+                        blocks = self._further_split_blocks(validated_blocks)
+
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2  # 递增等待: 2, 4, 6秒
+                        self.logger.info(f"等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+
+            except Exception as e:
+                error_msg = f"追加块时发生异常 (尝试 {attempt + 1}/{max_retries}): {str(e)}"
+                self.logger.error(error_msg)
+
+                if attempt == max_retries - 1:
+                    return {"success": False, "error": error_msg}
+                else:
+                    wait_time = (attempt + 1) * 2
+                    self.logger.info(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+
+        return {"success": False, "error": f"重试{max_retries}次后仍然失败"}
+
+    def _further_split_blocks(self, blocks: List[Dict]) -> List[Dict]:
+        """进一步分割内容块，处理仍然超长的内容"""
+        further_split_blocks = []
+
+        for block in blocks:
+            block_type = block.get("type")
+
+            if block_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
+                rich_text_list = block[block_type].get("rich_text", [])
+
+                new_rich_text = []
+                for text_item in rich_text_list:
+                    if text_item.get("text", {}).get("content"):
+                        content = text_item["text"]["content"]
+                        if len(content) > 1500:  # 更严格的长度限制
+                            # 进一步分割
+                            chunks = self._split_content_smartly(content, 1200)
+                            for chunk in chunks:
+                                chunk_item = text_item.copy()
+                                chunk_item["text"] = chunk_item["text"].copy()
+                                chunk_item["text"]["content"] = chunk
+                                new_rich_text.append(chunk_item)
+                        else:
+                            new_rich_text.append(text_item)
+                    else:
+                        new_rich_text.append(text_item)
+
+                # 更新块
+                block[block_type]["rich_text"] = new_rich_text
+
+            further_split_blocks.append(block)
+
+        return further_split_blocks
 
     def _append_blocks_to_page(self, page_id: str, blocks: List[Dict]) -> Dict[str, Any]:
         """向页面追加内容块"""
@@ -726,34 +915,14 @@ class JikeNotionClient:
             else:
                 self.logger.info(f"报告内容包含 {len(content_blocks)} 个块，在限制范围内")
 
-            # 验证每个块的内容长度
-            validated_blocks = []
-            for i, block in enumerate(content_blocks):
-                try:
-                    # 检查rich_text内容长度
-                    if block.get("type") in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
-                        block_type = block["type"]
-                        rich_text = block[block_type].get("rich_text", [])
-
-                        # 限制每个rich_text项的长度（Notion Plus用户可以支持更长内容）
-                        for text_item in rich_text:
-                            if text_item.get("text", {}).get("content"):
-                                content = text_item["text"]["content"]
-                                if len(content) > 2000:  # Notion API限制
-                                    original_length = len(content)
-                                    text_item["text"]["content"] = content[:1997] + "..."
-                                    self.logger.debug(f"块{i+1}文本被截断: {original_length} -> 2000字符")
-
-                    validated_blocks.append(block)
-                except Exception as e:
-                    self.logger.warning(f"验证块{i+1}时出错，跳过: {e}")
-                    continue
-
+            # 验证并修复每个块的内容长度
+            validated_blocks = self._validate_and_fix_content_blocks(content_blocks)
             self.logger.info(f"内容验证完成: {len(validated_blocks)}/{len(content_blocks)} 个块通过验证")
 
             # Notion API限制：单次创建页面最多100个子块
-            # 需要分批处理大内容
-            if len(validated_blocks) <= 100:
+            # 为了提高成功率，减少初始创建时的块数量
+            initial_block_limit = 50
+            if len(validated_blocks) <= initial_block_limit:
                 # 小内容，直接创建
                 create_result = self.create_page(day_page_id, report_title, validated_blocks)
             else:
