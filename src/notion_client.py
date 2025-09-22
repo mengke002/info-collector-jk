@@ -591,7 +591,7 @@ class JikeNotionClient:
         return blocks
 
     def _validate_and_fix_content_blocks(self, blocks: List[Dict]) -> List[Dict]:
-        """验证并修复内容块，处理长度超限问题"""
+        """验证并修复内容块，处理长度超限问题，不截断内容"""
         validated_blocks = []
 
         for i, block in enumerate(blocks):
@@ -600,9 +600,9 @@ class JikeNotionClient:
 
                 # 处理包含rich_text的块类型
                 if block_type in ["paragraph", "heading_1", "heading_2", "heading_3", "bulleted_list_item"]:
-                    fixed_block = self._fix_rich_text_content(block, i + 1)
-                    if fixed_block:
-                        validated_blocks.append(fixed_block)
+                    # 检查是否需要分割此块
+                    split_blocks = self._split_overlong_block(block, i + 1)
+                    validated_blocks.extend(split_blocks)
                 else:
                     # 其他类型的块直接添加
                     validated_blocks.append(block)
@@ -612,6 +612,76 @@ class JikeNotionClient:
                 continue
 
         return validated_blocks
+
+    def _split_overlong_block(self, block: Dict, block_index: int) -> List[Dict]:
+        """将超长的块分割成多个符合Notion限制的块，保持内容完整"""
+        try:
+            block_type = block["type"]
+            rich_text_list = block[block_type].get("rich_text", [])
+
+            if not rich_text_list:
+                return [block]
+
+            # 首先处理每个rich_text项的内容长度
+            processed_rich_text = []
+            for text_item in rich_text_list:
+                if not text_item.get("text", {}).get("content"):
+                    processed_rich_text.append(text_item)
+                    continue
+
+                content = text_item["text"]["content"]
+
+                # 如果单个内容超过2000字符，分割它
+                if len(content) > 2000:
+                    chunks = self._split_content_smartly(content, 1950)
+                    for chunk in chunks:
+                        chunk_item = text_item.copy()
+                        chunk_item["text"] = chunk_item["text"].copy()
+                        chunk_item["text"]["content"] = chunk
+                        processed_rich_text.append(chunk_item)
+                else:
+                    processed_rich_text.append(text_item)
+
+            # 检查rich_text数组长度是否超过100
+            if len(processed_rich_text) <= 100:
+                # 没有超长，直接返回修复后的块
+                fixed_block = block.copy()
+                fixed_block[block_type] = fixed_block[block_type].copy()
+                fixed_block[block_type]["rich_text"] = processed_rich_text
+                return [fixed_block]
+
+            # rich_text数组超长，需要分割成多个块
+            self.logger.info(f"块{block_index}的rich_text数组过长({len(processed_rich_text)}个元素)，分割成多个{block_type}块")
+
+            result_blocks = []
+            chunk_size = 99  # 每个块最多99个rich_text元素，留1个空间
+
+            for i in range(0, len(processed_rich_text), chunk_size):
+                chunk_rich_text = processed_rich_text[i:i + chunk_size]
+
+                # 创建新块
+                new_block = {
+                    "object": "block",
+                    "type": block_type,
+                    block_type: {
+                        "rich_text": chunk_rich_text
+                    }
+                }
+
+                # 如果是列表项且有子项，只在第一个块中保留子项
+                if block_type == "bulleted_list_item" and i == 0:
+                    if "children" in block[block_type]:
+                        new_block[block_type]["children"] = block[block_type]["children"]
+
+                result_blocks.append(new_block)
+
+            self.logger.debug(f"块{block_index}被分割为{len(result_blocks)}个块")
+            return result_blocks
+
+        except Exception as e:
+            self.logger.warning(f"分割块{block_index}时出错: {e}")
+            # 如果分割失败，返回原始块（可能会导致API错误，但不会丢失内容）
+            return [block]
 
     def _fix_rich_text_content(self, block: Dict, block_index: int) -> Optional[Dict]:
         """修复单个块的rich_text内容长度问题"""
