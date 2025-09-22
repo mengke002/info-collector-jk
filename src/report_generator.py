@@ -162,6 +162,41 @@ class JKReportGenerator:
             lines.append(f"- **【{s['sid']}】**: [@{s['nickname']}]({s['link']}): {clean_title}")
         return "\n".join(lines)
 
+    def _enhance_source_links(self, report_content: str, sources: List[Dict[str, Any]]) -> str:
+        """
+        增强报告中的来源链接，将 [Source: T1, T2] 中的每个 Txx 转换为可点击的链接
+        """
+        import re
+
+        # 构建来源ID到链接的映射
+        source_link_map = {s['sid']: s['link'] for s in sources}
+
+        def replace_source_refs(match):
+            # 提取完整的 Source 引用内容
+            full_source_text = match.group(0)  # 如 "[Source: T2, T9, T18]"
+            source_content = match.group(1)    # 如 "T2, T9, T18"
+
+            # 分割并处理每个来源ID
+            source_ids = [sid.strip() for sid in source_content.split(',')]
+            linked_sources = []
+
+            for sid in source_ids:
+                if sid in source_link_map:
+                    # 将 Txx 转换为链接
+                    linked_sources.append(f"[{sid}]({source_link_map[sid]})")
+                else:
+                    # 如果找不到对应链接，保持原样
+                    linked_sources.append(sid)
+
+            # 重新组合
+            return f"📎 [Source: {', '.join(linked_sources)}]"
+
+        # 查找所有 [Source: ...] 或 [Sources: ...] 模式并替换
+        pattern = r'\[Sources?:\s*([T\d\s,]+)\]'
+        enhanced_content = re.sub(pattern, replace_source_refs, report_content)
+
+        return enhanced_content
+
     # ---------- Prompt 模板 ----------
     def _prompt_daily(self) -> str:
         return """# Role: 资深社区战略分析师
@@ -343,7 +378,12 @@ class JKReportGenerator:
             lines.append(f"{idx}. {title} - @{nickname}  {link}")
         lines.append("")
         lines.append(self._render_sources_section(sources))
-        return "\n".join(lines)
+        report_content = "\n".join(lines)
+
+        # 为占位报告也应用来源链接增强后处理
+        report_content = self._enhance_source_links(report_content, sources)
+
+        return report_content
 
     def generate_daily_hotspot(self, hours_back: Optional[int] = None) -> Dict[str, Any]:
         hours = int(hours_back or self.analysis_cfg.get('hours_back_daily', 24))
@@ -402,6 +442,9 @@ class JKReportGenerator:
             footer_section = "\n".join(footer_lines)
 
             report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+            # 应用来源链接增强后处理
+            report_content = self._enhance_source_links(report_content, sources)
 
         title = f"即刻24h热点观察 - {end_time.strftime('%Y-%m-%d %H:%M')}"
         report_row = {
@@ -513,6 +556,9 @@ class JKReportGenerator:
 
             report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
 
+            # 应用来源链接增强后处理
+            report_content = self._enhance_source_links(report_content, sources)
+
         title = f"即刻周度社群洞察 - 截止 {end_time.strftime('%Y-%m-%d')}"
         report_row = {
             'report_type': 'weekly_digest',
@@ -623,6 +669,9 @@ class JKReportGenerator:
             footer_section = "\n".join(footer_lines)
 
             report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+            # 应用来源链接增强后处理
+            report_content = self._enhance_source_links(report_content, sources)
 
         # 简单季度标题
         q = (end_time.month - 1) // 3 + 1
@@ -744,6 +793,9 @@ class JKReportGenerator:
                 footer_section = "\n".join(footer_lines)
 
                 report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+                # 应用来源链接增强后处理
+                report_content = self._enhance_source_links(report_content, sources)
 
             title = f"KOL思想轨迹 - {uid} - 截止 {end_time_global.strftime('%Y-%m-%d')}"
             row = {
