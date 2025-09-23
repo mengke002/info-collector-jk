@@ -35,9 +35,9 @@ jobs:
           # LLM API配置
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LLM_REPORT_MODELS: ${{ secrets.LLM_REPORT_MODELS }}
           LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
           LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
-          LLM_SMART_MODEL_NAME: ${{ secrets.LLM_SMART_MODEL_NAME }}
 
           # 数据库配置
           DB_HOST: ${{ secrets.DB_HOST }}

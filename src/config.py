@@ -73,6 +73,18 @@ class Config:
         
         # 3. 返回默认值
         return default_value
+
+    def _parse_model_list(self, raw_value: str) -> List[str]:
+        """将逗号分隔的模型字符串解析为有序且去重的列表"""
+        if not raw_value:
+            return []
+
+        models: List[str] = []
+        for item in raw_value.split(','):
+            candidate = item.strip()
+            if candidate and candidate not in models:
+                models.append(candidate)
+        return models
     
     def get_database_config(self) -> Dict[str, Any]:
         """获取数据库配置，优先级：环境变量 > config.ini > 默认值"""
@@ -156,6 +168,34 @@ class Config:
         if not openai_api_key:
             raise ValueError("OPENAI_API_KEY 未设置。请在环境变量或config.ini中设置LLM功能需要API密钥。")
 
+        # 解析逗号分隔的报告模型列表（优先取环境变量）
+        models_raw = self._get_config_value('llm', 'report_models', 'LLM_REPORT_MODELS', '', str)
+        if not models_raw:
+            models_raw = self._get_config_value('llm', 'openai_models', 'OPENAI_MODELS', '', str)
+        report_models = self._parse_model_list(models_raw)
+
+        # 兼容旧配置：单独的smart/priority模型
+        legacy_smart = self._get_config_value('llm', 'smart_model_name', 'LLM_SMART_MODEL_NAME', '', str)
+        legacy_priority = self._get_config_value('llm', 'priority_smart_model_name', 'LLM_PRIORITY_SMART_MODEL_NAME', '', str)
+
+        if not report_models:
+            if legacy_priority:
+                report_models.append(legacy_priority)
+            if legacy_smart and legacy_smart not in report_models:
+                report_models.append(legacy_smart)
+
+        primary_model = report_models[0] if report_models else legacy_smart or 'gpt-4.1'
+
+        secondary_model = None
+        if report_models:
+            for candidate in report_models[1:]:
+                if candidate and candidate != primary_model:
+                    secondary_model = candidate
+                    break
+
+        if not secondary_model and legacy_priority and legacy_priority != primary_model:
+            secondary_model = legacy_priority
+
         return {
             # 快速模型配置
             'fast_model_name': self._get_config_value('llm', 'fast_model_name', 'LLM_FAST_MODEL_NAME', 'gpt-4.1'),
@@ -164,8 +204,9 @@ class Config:
             'fast_vlm_name': self._get_config_value('llm', 'fast_vlm_name', 'LLM_FAST_VLM_NAME', 'gpt-4.1'),
 
             # 智能模型配置
-            'smart_model_name': self._get_config_value('llm', 'smart_model_name', 'LLM_SMART_MODEL_NAME', 'gpt-4.1'),
-            'priority_smart_model_name': self._get_config_value('llm', 'priority_smart_model_name', 'LLM_PRIORITY_SMART_MODEL_NAME', 'gpt-4.1'),
+            'smart_model_name': primary_model,
+            'priority_smart_model_name': secondary_model,
+            'report_models': report_models,
 
             # API配置
             'openai_api_key': openai_api_key,
@@ -206,9 +247,10 @@ class Config:
     def get_priority_smart_model_config(self) -> Dict[str, str]:
         """获取优先智能模型配置"""
         llm_config = self.get_llm_config()
+        model_name = llm_config['priority_smart_model_name'] or llm_config['smart_model_name']
         return {
             'provider': 'openai',
-            'model_name': llm_config['priority_smart_model_name'],
+            'model_name': model_name,
             'api_key': llm_config['openai_api_key'],
             'base_url': llm_config['openai_base_url']
         }

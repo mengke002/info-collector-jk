@@ -27,8 +27,17 @@ class LLMClient:
         # 获取不同类型的模型配置
         self.fast_model = llm_config.get('fast_model_name', 'gpt-4.1')
         self.vlm_model = llm_config.get('fast_vlm_name', 'gpt-4.1')
-        self.smart_model = llm_config.get('smart_model_name', 'gpt-4.1')
-        self.priority_model = llm_config.get('priority_smart_model_name', 'gpt-4.1')
+
+        models = llm_config.get('report_models') or []
+        self.models = [m for m in models if isinstance(m, str) and m.strip()]
+
+        self.smart_model = llm_config.get('smart_model_name') or None
+        if not self.smart_model and self.models:
+            self.smart_model = self.models[0]
+
+        self.priority_model = llm_config.get('priority_smart_model_name') or None
+        if not self.priority_model and len(self.models) > 1:
+            self.priority_model = self.models[1]
 
         if not self.api_key:
             raise ValueError("未找到OPENAI_API_KEY配置，请在环境变量或config.ini中设置")
@@ -39,11 +48,17 @@ class LLMClient:
             base_url=self.base_url
         )
 
-        self.logger.info(f"LLM客户端初始化成功")
+        self.logger.info("LLM客户端初始化成功")
         self.logger.info(f"快速模型: {self.fast_model}")
         self.logger.info(f"视觉模型: {self.vlm_model}")
-        self.logger.info(f"智能模型: {self.smart_model}")
-        self.logger.info(f"优先模型: {self.priority_model}")
+
+        if self.models:
+            self.logger.info(f"报告模型列表: {', '.join(self.models)}")
+        else:
+            self.logger.info(f"报告模型: {self.smart_model}")
+
+        self.logger.info(f"默认智能模型: {self.smart_model}")
+        self.logger.info(f"优先模型: {self.priority_model or '未设置'}")
 
     def call_fast_model(self, prompt: str, temperature: float = 0.1, max_retries: int = 3) -> Dict[str, Any]:
         """
@@ -57,8 +72,38 @@ class LLMClient:
         调用智能模型进行深度分析
         适用于：报告生成、深度洞察、综合分析等复杂任务
         """
-        model_to_use = model_override or self.smart_model
-        return self._make_request(prompt, model_to_use, temperature, max_retries)
+        if model_override:
+            return self._make_request(prompt, model_override, temperature, max_retries)
+
+        models_to_try: List[str] = []
+        for candidate in self.models:
+            if candidate and candidate not in models_to_try:
+                models_to_try.append(candidate)
+
+        if not models_to_try and self.smart_model:
+            models_to_try.append(self.smart_model)
+
+        if not models_to_try:
+            raise ValueError("未配置可用的智能模型")
+
+        last_response: Dict[str, Any] = {
+            'success': False,
+            'error': '所有智能模型均调用失败'
+        }
+
+        for index, model_name in enumerate(models_to_try):
+            result = self._make_request(prompt, model_name, temperature, max_retries)
+            if result.get('success'):
+                return result
+
+            last_response = result
+            if index < len(models_to_try) - 1:
+                fallback_target = models_to_try[index + 1]
+                self.logger.warning(
+                    f"模型 {model_name} 在 {max_retries} 次尝试后失败，将回退至 {fallback_target}"
+                )
+
+        return last_response
 
     def call_vlm(self, prompt: str, image_data_list: List[Dict[str, Any]], temperature: float = 0.3, max_retries: int = 3) -> Dict[str, Any]:
         """

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import pymysql
@@ -398,6 +399,67 @@ class DatabaseManager:
                     LIMIT 1000
                 """, (days,))
                 return cur.fetchall()
+
+    def get_recent_daily_reports(self, days: int = 7) -> List[Dict[str, Any]]:
+        """获取最近若干天的每日热点报告（每个自然日最新一篇）"""
+        if days <= 0:
+            return []
+
+        with self.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, report_title, report_content,
+                           analysis_period_start, analysis_period_end,
+                           items_analyzed, generated_at
+                    FROM jk_reports
+                    WHERE report_type = 'daily_hotspot'
+                      AND analysis_period_end >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                    ORDER BY analysis_period_end DESC, generated_at DESC
+                    """,
+                    (days + 1,)
+                )
+                rows = cur.fetchall()
+
+        if not rows:
+            return []
+
+        seen_dates = set()
+        selected: List[Dict[str, Any]] = []
+
+        for row in rows:
+            analysis_end = row.get('analysis_period_end')
+            if isinstance(analysis_end, datetime):
+                day_key = analysis_end.date()
+            else:
+                # 兜底：如果字段是字符串，尝试解析
+                try:
+                    parsed = datetime.fromisoformat(str(analysis_end))
+                    day_key = parsed.date()
+                    row['analysis_period_end'] = parsed
+                except Exception:
+                    day_key = None
+            if day_key is None:
+                continue
+
+            analysis_start = row.get('analysis_period_start')
+            if analysis_start is not None and not isinstance(analysis_start, datetime):
+                try:
+                    row['analysis_period_start'] = datetime.fromisoformat(str(analysis_start))
+                except Exception:
+                    row['analysis_period_start'] = None
+
+            if day_key in seen_dates:
+                continue
+
+            seen_dates.add(day_key)
+            selected.append(row)
+
+            if len(selected) >= days:
+                break
+
+        selected.reverse()
+        return selected
 
     def get_postprocessing_stats(self) -> Dict[str, int]:
         """获取后处理统计信息"""
