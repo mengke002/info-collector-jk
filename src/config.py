@@ -165,6 +165,7 @@ class Config:
 
             # 智能模型配置
             'smart_model_name': self._get_config_value('llm', 'smart_model_name', 'LLM_SMART_MODEL_NAME', 'gpt-4.1'),
+            'priority_smart_model_name': self._get_config_value('llm', 'priority_smart_model_name', 'LLM_PRIORITY_SMART_MODEL_NAME', 'gpt-4.1'),
 
             # API配置
             'openai_api_key': openai_api_key,
@@ -198,6 +199,16 @@ class Config:
         return {
             'provider': 'openai',
             'model_name': llm_config['smart_model_name'],
+            'api_key': llm_config['openai_api_key'],
+            'base_url': llm_config['openai_base_url']
+        }
+
+    def get_priority_smart_model_config(self) -> Dict[str, str]:
+        """获取优先智能模型配置"""
+        llm_config = self.get_llm_config()
+        return {
+            'provider': 'openai',
+            'model_name': llm_config['priority_smart_model_name'],
             'api_key': llm_config['openai_api_key'],
             'base_url': llm_config['openai_base_url']
         }

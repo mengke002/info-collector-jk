@@ -156,6 +156,10 @@ jobs:
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
+      LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
+      LLM_SMART_MODEL_NAME: ${{ secrets.LLM_SMART_MODEL_NAME }}
+      LLM_PRIORITY_SMART_MODEL_NAME: ${{ secrets.LLM_PRIORITY_SMART_MODEL_NAME }}
 
       # --- Notion集成配置 (可选) ---
       NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}
@@ -209,6 +213,10 @@ jobs:
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
+      LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
+      LLM_SMART_MODEL_NAME: ${{ secrets.LLM_SMART_MODEL_NAME }}
+      LLM_PRIORITY_SMART_MODEL_NAME: ${{ secrets.LLM_PRIORITY_SMART_MODEL_NAME }}
 
       # --- Notion集成配置 (可选) ---
       NOTION_INTEGRATION_TOKEN: ${{ secrets.NOTION_INTEGRATION_TOKEN }}

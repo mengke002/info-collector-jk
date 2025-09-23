@@ -28,6 +28,7 @@ class LLMClient:
         self.fast_model = llm_config.get('fast_model_name', 'gpt-4.1')
         self.vlm_model = llm_config.get('fast_vlm_name', 'gpt-4.1')
         self.smart_model = llm_config.get('smart_model_name', 'gpt-4.1')
+        self.priority_model = llm_config.get('priority_smart_model_name', 'gpt-4.1')
 
         if not self.api_key:
             raise ValueError("未找到OPENAI_API_KEY配置，请在环境变量或config.ini中设置")
@@ -42,6 +43,7 @@ class LLMClient:
         self.logger.info(f"快速模型: {self.fast_model}")
         self.logger.info(f"视觉模型: {self.vlm_model}")
         self.logger.info(f"智能模型: {self.smart_model}")
+        self.logger.info(f"优先模型: {self.priority_model}")
 
     def call_fast_model(self, prompt: str, temperature: float = 0.1, max_retries: int = 3) -> Dict[str, Any]:
         """
@@ -50,12 +52,13 @@ class LLMClient:
         """
         return self._make_request(prompt, self.fast_model, temperature, max_retries)
 
-    def call_smart_model(self, prompt: str, temperature: float = 0.5, max_retries: int = 3) -> Dict[str, Any]:
+    def call_smart_model(self, prompt: str, temperature: float = 0.5, max_retries: int = 3, model_override: Optional[str] = None) -> Dict[str, Any]:
         """
         调用智能模型进行深度分析
         适用于：报告生成、深度洞察、综合分析等复杂任务
         """
-        return self._make_request(prompt, self.smart_model, temperature, max_retries)
+        model_to_use = model_override or self.smart_model
+        return self._make_request(prompt, model_to_use, temperature, max_retries)
 
     def call_vlm(self, prompt: str, image_data_list: List[Dict[str, Any]], temperature: float = 0.3, max_retries: int = 3) -> Dict[str, Any]:
         """
@@ -144,12 +147,30 @@ class LLMClient:
 
                 for chunk in response:
                     chunk_count += 1
-                    delta = chunk.choices[0].delta
-                    content_chunk = getattr(delta, 'content', None)
+                    try:
+                        # 安全检查chunk结构
+                        if not hasattr(chunk, 'choices') or not chunk.choices:
+                            self.logger.debug(f"跳过空VLM chunk {chunk_count}")
+                            continue
 
-                    if content_chunk:
-                        full_content += content_chunk
-                        self.logger.debug(f"VLM Chunk {chunk_count}: {content_chunk[:50]}...")
+                        # 安全检查choices列表长度
+                        if len(chunk.choices) == 0:
+                            self.logger.debug(f"跳过空choices的VLM chunk {chunk_count}")
+                            continue
+
+                        delta = chunk.choices[0].delta
+                        content_chunk = getattr(delta, 'content', None)
+
+                        if content_chunk:
+                            full_content += content_chunk
+                            self.logger.debug(f"VLM Chunk {chunk_count}: {content_chunk[:50]}...")
+                    except IndexError as e:
+                        self.logger.warning(f"VLM Chunk {chunk_count} 处理异常 (IndexError)，已跳过: {e}")
+                        continue
+                    except Exception as chunk_error:
+                        self.logger.warning(f"VLM Chunk {chunk_count} 处理异常，已跳过: {chunk_error}")
+                        self.logger.debug("异常VLM chunk详情: %r", chunk, exc_info=True)
+                        continue
 
                 self.logger.info(f"VLM调用完成 - 处理了 {chunk_count} 个chunks")
                 self.logger.info(f"响应内容长度: {len(full_content)} 字符")
@@ -233,31 +254,39 @@ class LLMClient:
 
                 for chunk in response:
                     chunk_count += 1
+                    try:
+                        # 安全检查chunk结构
+                        if not hasattr(chunk, 'choices') or not chunk.choices:
+                            self.logger.debug(f"跳过空chunk {chunk_count}")
+                            continue
 
-                    # 安全检查chunk结构
-                    if not hasattr(chunk, 'choices') or not chunk.choices:
-                        self.logger.debug(f"跳过空chunk {chunk_count}")
+                        # 安全检查choices列表长度
+                        if len(chunk.choices) == 0:
+                            self.logger.debug(f"跳过空choices的chunk {chunk_count}")
+                            continue
+
+                        delta = chunk.choices[0].delta
+
+                        # 安全地获取reasoning_content和content
+                        reasoning_content = getattr(delta, 'reasoning_content', None)
+                        content_chunk = getattr(delta, 'content', None)
+
+                        if reasoning_content:
+                            # 推理内容单独收集，但不加入最终结果
+                            reasoning_content_full += reasoning_content
+                            self.logger.debug(f"Chunk {chunk_count} - Reasoning: {reasoning_content[:50]}...")
+
+                        if content_chunk:
+                            # 只收集最终的content内容
+                            full_content += content_chunk
+                            self.logger.debug(f"Chunk {chunk_count} - Content: {content_chunk[:50]}...")
+                    except IndexError as e:
+                        self.logger.warning(f"Chunk {chunk_count} 处理异常 (IndexError)，已跳过: {e}")
                         continue
-
-                    if len(chunk.choices) == 0:
-                        self.logger.debug(f"跳过没有choices的chunk {chunk_count}")
+                    except Exception as chunk_error:
+                        self.logger.warning(f"Chunk {chunk_count} 处理异常，已跳过: {chunk_error}")
+                        self.logger.debug("异常chunk详情: %r", chunk, exc_info=True)
                         continue
-
-                    delta = chunk.choices[0].delta
-
-                    # 安全地获取reasoning_content和content
-                    reasoning_content = getattr(delta, 'reasoning_content', None)
-                    content_chunk = getattr(delta, 'content', None)
-
-                    if reasoning_content:
-                        # 推理内容单独收集，但不加入最终结果
-                        reasoning_content_full += reasoning_content
-                        self.logger.debug(f"Chunk {chunk_count} - Reasoning: {reasoning_content[:50]}...")
-
-                    if content_chunk:
-                        # 只收集最终的content内容
-                        full_content += content_chunk
-                        self.logger.debug(f"Chunk {chunk_count} - Content: {content_chunk[:50]}...")
 
                 self.logger.info(f"LLM调用完成 - 处理了 {chunk_count} 个chunks")
                 self.logger.info(f"响应内容长度: {len(full_content)} 字符")

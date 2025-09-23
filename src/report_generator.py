@@ -37,6 +37,37 @@ class JKReportGenerator:
     def _bj_time(self) -> datetime:
         return datetime.now(timezone.utc) + timedelta(hours=8)
 
+    def _get_report_models(self) -> List[str]:
+        """获取用于生成报告的模型列表（优先模型 + 默认模型）"""
+        if not llm_client:
+            return []
+
+        models = []
+        priority_model = getattr(llm_client, 'priority_model', None)
+        base_model = getattr(llm_client, 'smart_model', None)
+
+        if priority_model:
+            models.append(priority_model)
+        if base_model and base_model not in models:
+            models.append(base_model)
+
+        return models
+
+    def _get_model_display_name(self, model_name: str) -> str:
+        """根据模型名称生成用于展示的友好名称"""
+        if not model_name:
+            return 'LLM'
+
+        lower_name = model_name.lower()
+        if 'gemini' in lower_name:
+            return 'Gemini'
+        if 'glm' in lower_name and '4.5' in lower_name:
+            return 'GLM4.5'
+        if 'glm' in lower_name:
+            return 'GLM'
+
+        return model_name
+
     # ---------- 数据准备与格式化 ----------
     def _truncate(self, text: str, max_len: int) -> str:
         if not text:
@@ -339,7 +370,7 @@ class JKReportGenerator:
         )
 
     # ---------- 报告生成 ----------
-    def _analyze_with_llm(self, content: str, prompt_template: str) -> Optional[Dict[str, Any]]:
+    def _analyze_with_llm(self, content: str, prompt_template: str, model_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """调用智能模型进行深度分析，失败时返回None"""
         try:
             if llm_client is None:
@@ -347,7 +378,7 @@ class JKReportGenerator:
             # 格式化提示词
             prompt = prompt_template.format(content=content)
             # 使用智能模型进行复杂报告生成任务
-            res = llm_client.call_smart_model(prompt)
+            res = llm_client.call_smart_model(prompt, model_override=model_override)
             if isinstance(res, dict) and res.get('success'):
                 return res
             return None
@@ -399,109 +430,151 @@ class JKReportGenerator:
 
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
         prompt = self._prompt_daily()
-        llm_analysis_result = self._analyze_with_llm(content_md, prompt)
 
-        if not llm_analysis_result:
-            header = "# 即刻24小时热点追踪器 (占位版)"
-            report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
-        else:
-            llm_output = llm_analysis_result.get('content', '')
-            # 为LLM生成的报告添加标准头部信息
-            beijing_time = self._bj_time()
-            header_info = [
-                f"# 📈 即刻24小时热点追踪器",
-                "",
-                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*分析动态数: {len(posts)} 条*",
-                "",
-                "---",
-                ""
-            ]
-
-            # 清理LLM输出中可能的格式问题
-            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
-
-            sources_section = self._render_sources_section(sources)
-
-            # 构建报告尾部
-            footer_lines = ["", "---", ""]
-            provider = llm_analysis_result.get('provider')
-            model = llm_analysis_result.get('model')
-            if provider:
-                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
-            
-            footer_lines.extend([
-                "",
-                f"📊 **统计摘要**: 本报告分析了 {len(posts)} 条动态",
-                "",
-                "*本报告由AI自动生成，仅供参考*"
-            ])
-            footer_section = "\n".join(footer_lines)
-
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
-
-            # 应用来源链接增强后处理
-            report_content = self._enhance_source_links(report_content, sources)
-
-        title = f"即刻24h热点观察 - {end_time.strftime('%Y-%m-%d %H:%M')}"
-        report_row = {
-            'report_type': 'daily_hotspot',
-            'scope': 'global',
-            'analysis_period_start': start_time,
-            'analysis_period_end': end_time,
-            'items_analyzed': len(posts),
-            'report_title': title,
-            'report_content': report_content,
-        }
-        report_id = self.db.save_report(report_row)
-
-        result = {
-            'success': True,
-            'report_id': report_id,
-            'items_analyzed': len(posts),
-            'title': title,
-        }
-
-        # 尝试推送到Notion
-        try:
-            from .notion_client import jike_notion_client
-
-            # 格式化Notion标题
-            beijing_time = self._bj_time()
-            time_str = beijing_time.strftime('%H:%M')
-            notion_title = f"[{time_str}] 即刻24h热点观察 ({len(posts)}条动态)"
-
-            self.logger.info(f"开始推送日报到Notion: {notion_title}")
-
-            notion_result = jike_notion_client.create_report_page(
-                report_title=notion_title,
-                report_content=report_content,
-                report_date=beijing_time
-            )
-
-            if notion_result.get('success'):
-                self.logger.info(f"日报成功推送到Notion: {notion_result.get('page_url')}")
-                result['notion_push'] = {
-                    'success': True,
-                    'page_url': notion_result.get('page_url'),
-                    'path': notion_result.get('path')
-                }
-            else:
-                self.logger.warning(f"推送日报到Notion失败: {notion_result.get('error')}")
-                result['notion_push'] = {
-                    'success': False,
-                    'error': notion_result.get('error')
-                }
-
-        except Exception as e:
-            self.logger.warning(f"推送日报到Notion时出错: {e}")
-            result['notion_push'] = {
+        # 获取要使用的模型列表
+        models_to_generate = self._get_report_models()
+        if not models_to_generate:
+            self.logger.warning("未配置任何可用于生成报告的模型")
+            return {
                 'success': False,
-                'error': str(e)
+                'error': '未配置可用的LLM模型',
+                'items_analyzed': 0
             }
+
+        model_reports: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+
+        # 为每个模型生成报告
+        for model_name in models_to_generate:
+            display_name = self._get_model_display_name(model_name)
+            
+            self.logger.info(f"开始使用模型 {model_name} ({display_name}) 生成日报")
+            
+            llm_analysis_result = self._analyze_with_llm(content_md, prompt, model_override=model_name)
+
+            if not llm_analysis_result:
+                header = f"# 📈 即刻24小时热点追踪器 - {display_name} (占位版)"
+                report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
+            else:
+                llm_output = llm_analysis_result.get('content', '')
+                # 为LLM生成的报告添加标准头部信息
+                beijing_time = self._bj_time()
+                header_info = [
+                    f"# 📈 即刻24小时热点追踪器 - {display_name}",
+                    "",
+                    f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*分析动态数: {len(posts)} 条*",
+                    "",
+                    "---",
+                    ""
+                ]
+
+                # 清理LLM输出中可能的格式问题
+                cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+                sources_section = self._render_sources_section(sources)
+
+                # 构建报告尾部
+                footer_lines = ["", "---", ""]
+                provider = llm_analysis_result.get('provider')
+                model = llm_analysis_result.get('model')
+                if provider:
+                    footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+                
+                footer_lines.extend([
+                    "",
+                    f"📊 **统计摘要**: 本报告分析了 {len(posts)} 条动态",
+                    "",
+                    "*本报告由AI自动生成，仅供参考*"
+                ])
+                footer_section = "\n".join(footer_lines)
+
+                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+                # 应用来源链接增强后处理
+                report_content = self._enhance_source_links(report_content, sources)
+
+            title = f"即刻24h热点观察 - {display_name} - {end_time.strftime('%Y-%m-%d %H:%M')}"
+            report_row = {
+                'report_type': 'daily_hotspot',
+                'scope': 'global',
+                'analysis_period_start': start_time,
+                'analysis_period_end': end_time,
+                'items_analyzed': len(posts),
+                'report_title': title,
+                'report_content': report_content,
+            }
+            report_id = self.db.save_report(report_row)
+
+            model_report = {
+                'model': model_name,
+                'model_display': display_name,
+                'success': True,
+                'report_id': report_id,
+                'report_title': title,
+                'provider': llm_analysis_result.get('provider') if llm_analysis_result else None,
+                'items_analyzed': len(posts)
+            }
+
+            # 尝试推送到Notion
+            try:
+                from .notion_client import jike_notion_client
+
+                # 格式化Notion标题
+                beijing_time = self._bj_time()
+                time_str = beijing_time.strftime('%H:%M')
+                notion_title = f"[{time_str}] [{display_name}] 即刻24h热点观察 ({len(posts)}条动态)"
+
+                self.logger.info(f"开始推送日报到Notion ({display_name}): {notion_title}")
+
+                notion_result = jike_notion_client.create_report_page(
+                    report_title=notion_title,
+                    report_content=report_content,
+                    report_date=beijing_time
+                )
+
+                if notion_result.get('success'):
+                    self.logger.info(f"日报成功推送到Notion ({display_name}): {notion_result.get('page_url')}")
+                    model_report['notion_push'] = {
+                        'success': True,
+                        'page_url': notion_result.get('page_url'),
+                        'path': notion_result.get('path')
+                    }
+                else:
+                    self.logger.warning(f"推送日报到Notion失败 ({display_name}): {notion_result.get('error')}")
+                    model_report['notion_push'] = {
+                        'success': False,
+                        'error': notion_result.get('error')
+                    }
+
+            except Exception as e:
+                self.logger.warning(f"推送日报到Notion时出错 ({display_name}): {e}")
+                model_report['notion_push'] = {
+                    'success': False,
+                    'error': str(e)
+                }
+
+            model_reports.append(model_report)
+
+        # 构建最终结果
+        overall_success = len(model_reports) > 0
+        result = {
+            'success': overall_success,
+            'items_analyzed': len(posts) if overall_success else 0,
+            'model_reports': model_reports,
+            'failures': failures
+        }
+
+        if overall_success:
+            # 使用第一个成功的报告作为主要结果
+            primary_report = model_reports[0]
+            result['report_id'] = primary_report['report_id']
+            result['title'] = primary_report['report_title']
+            result['notion_push'] = primary_report.get('notion_push')
+            result['report_ids'] = [mr['report_id'] for mr in model_reports]
 
         return result
 
@@ -515,105 +588,148 @@ class JKReportGenerator:
             return {'success': False, 'error': f'最近{days}天内无动态可分析'}
 
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
-        llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly())
-        if not llm_analysis_result:
-            header = "# 即刻周度社群洞察 (占位版)"
-            report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
-        else:
-            llm_output = llm_analysis_result.get('content', '')
-            # 为LLM生成的报告添加标准头部信息
-            beijing_time = self._bj_time()
-            header_info = [
-                f"# 📊 即刻周度社群洞察",
-                "",
-                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*分析动态数: {len(posts)} 条*",
-                "",
-                "---",
-                ""
-            ]
 
-            # 清理LLM输出中可能的格式问题
-            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
-
-            sources_section = self._render_sources_section(sources)
-
-            # 构建报告尾部
-            footer_lines = ["", "---", ""]
-            provider = llm_analysis_result.get('provider')
-            model = llm_analysis_result.get('model')
-            if provider:
-                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
-            
-            footer_lines.extend([
-                "",
-                "*本报告由AI自动生成，仅供参考*"
-            ])
-            footer_section = "\n".join(footer_lines)
-
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
-
-            # 应用来源链接增强后处理
-            report_content = self._enhance_source_links(report_content, sources)
-
-        title = f"即刻周度社群洞察 - 截止 {end_time.strftime('%Y-%m-%d')}"
-        report_row = {
-            'report_type': 'weekly_digest',
-            'scope': 'global',
-            'analysis_period_start': start_time,
-            'analysis_period_end': end_time,
-            'items_analyzed': len(posts),
-            'report_title': title,
-            'report_content': report_content,
-        }
-        report_id = self.db.save_report(report_row)
-
-        result = {
-            'success': True,
-            'report_id': report_id,
-            'items_analyzed': len(posts),
-            'title': title,
-        }
-
-        # 尝试推送到Notion
-        try:
-            from .notion_client import jike_notion_client
-
-            # 格式化Notion标题
-            beijing_time = self._bj_time()
-            notion_title = f"即刻周度社群洞察 - {beijing_time.strftime('%Y%m%d')} ({len(posts)}条动态)"
-
-            self.logger.info(f"开始推送周报到Notion: {notion_title}")
-
-            notion_result = jike_notion_client.create_report_page(
-                report_title=notion_title,
-                report_content=report_content,
-                report_date=beijing_time
-            )
-
-            if notion_result.get('success'):
-                self.logger.info(f"周报成功推送到Notion: {notion_result.get('page_url')}")
-                result['notion_push'] = {
-                    'success': True,
-                    'page_url': notion_result.get('page_url'),
-                    'path': notion_result.get('path')
-                }
-            else:
-                self.logger.warning(f"推送周报到Notion失败: {notion_result.get('error')}")
-                result['notion_push'] = {
-                    'success': False,
-                    'error': notion_result.get('error')
-                }
-
-        except Exception as e:
-            self.logger.warning(f"推送周报到Notion时出错: {e}")
-            result['notion_push'] = {
+        # 获取要使用的模型列表
+        models_to_generate = self._get_report_models()
+        if not models_to_generate:
+            self.logger.warning("未配置任何可用于生成报告的模型")
+            return {
                 'success': False,
-                'error': str(e)
+                'error': '未配置可用的LLM模型',
+                'items_analyzed': 0
             }
+
+        model_reports: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+
+        # 为每个模型生成报告
+        for model_name in models_to_generate:
+            display_name = self._get_model_display_name(model_name)
+            
+            self.logger.info(f"开始使用模型 {model_name} ({display_name}) 生成周报")
+            
+            llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly(), model_override=model_name)
+            
+            if not llm_analysis_result:
+                header = f"# 📊 即刻周度社群洞察 - {display_name} (占位版)"
+                report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
+            else:
+                llm_output = llm_analysis_result.get('content', '')
+                # 为LLM生成的报告添加标准头部信息
+                beijing_time = self._bj_time()
+                header_info = [
+                    f"# 📊 即刻周度社群洞察 - {display_name}",
+                    "",
+                    f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*分析动态数: {len(posts)} 条*",
+                    "",
+                    "---",
+                    ""
+                ]
+
+                # 清理LLM输出中可能的格式问题
+                cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+                sources_section = self._render_sources_section(sources)
+
+                # 构建报告尾部
+                footer_lines = ["", "---", ""]
+                provider = llm_analysis_result.get('provider')
+                model = llm_analysis_result.get('model')
+                if provider:
+                    footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+                
+                footer_lines.extend([
+                    "",
+                    "*本报告由AI自动生成，仅供参考*"
+                ])
+                footer_section = "\n".join(footer_lines)
+
+                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+                # 应用来源链接增强后处理
+                report_content = self._enhance_source_links(report_content, sources)
+
+            title = f"即刻周度社群洞察 - {display_name} - 截止 {end_time.strftime('%Y-%m-%d')}"
+            report_row = {
+                'report_type': 'weekly_digest',
+                'scope': 'global',
+                'analysis_period_start': start_time,
+                'analysis_period_end': end_time,
+                'items_analyzed': len(posts),
+                'report_title': title,
+                'report_content': report_content,
+            }
+            report_id = self.db.save_report(report_row)
+
+            model_report = {
+                'model': model_name,
+                'model_display': display_name,
+                'success': True,
+                'report_id': report_id,
+                'report_title': title,
+                'provider': llm_analysis_result.get('provider') if llm_analysis_result else None,
+                'items_analyzed': len(posts)
+            }
+
+            # 尝试推送到Notion
+            try:
+                from .notion_client import jike_notion_client
+
+                # 格式化Notion标题
+                beijing_time = self._bj_time()
+                notion_title = f"[{display_name}] 即刻周度社群洞察 - {beijing_time.strftime('%Y%m%d')} ({len(posts)}条动态)"
+
+                self.logger.info(f"开始推送周报到Notion ({display_name}): {notion_title}")
+
+                notion_result = jike_notion_client.create_report_page(
+                    report_title=notion_title,
+                    report_content=report_content,
+                    report_date=beijing_time
+                )
+
+                if notion_result.get('success'):
+                    self.logger.info(f"周报成功推送到Notion ({display_name}): {notion_result.get('page_url')}")
+                    model_report['notion_push'] = {
+                        'success': True,
+                        'page_url': notion_result.get('page_url'),
+                        'path': notion_result.get('path')
+                    }
+                else:
+                    self.logger.warning(f"推送周报到Notion失败 ({display_name}): {notion_result.get('error')}")
+                    model_report['notion_push'] = {
+                        'success': False,
+                        'error': notion_result.get('error')
+                    }
+
+            except Exception as e:
+                self.logger.warning(f"推送周报到Notion时出错 ({display_name}): {e}")
+                model_report['notion_push'] = {
+                    'success': False,
+                    'error': str(e)
+                }
+
+            model_reports.append(model_report)
+
+        # 构建最终结果
+        overall_success = len(model_reports) > 0
+        result = {
+            'success': overall_success,
+            'items_analyzed': len(posts) if overall_success else 0,
+            'model_reports': model_reports,
+            'failures': failures
+        }
+
+        if overall_success:
+            # 使用第一个成功的报告作为主要结果
+            primary_report = model_reports[0]
+            result['report_id'] = primary_report['report_id']
+            result['title'] = primary_report['report_title']
+            result['notion_push'] = primary_report.get('notion_push')
+            result['report_ids'] = [mr['report_id'] for mr in model_reports]
 
         return result
 
@@ -628,108 +744,151 @@ class JKReportGenerator:
 
         # 复用周报提示词，实际可更复杂
         content_md, sources = self._format_posts_for_llm(posts, source_prefix='T')
-        llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly())
-        if not llm_analysis_result:
-            header = "# 即刻季度战略叙事 (占位版)"
-            report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
-        else:
-            llm_output = llm_analysis_result.get('content', '')
-            # 为LLM生成的报告添加标准头部信息
-            beijing_time = self._bj_time()
-            q = (end_time.month - 1) // 3 + 1
-            header_info = [
-                f"# 🚀 即刻季度战略叙事 - {end_time.year} Q{q}",
-                "",
-                f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
-                "",
-                f"*分析动态数: {len(posts)} 条*",
-                "",
-                "---",
-                ""
-            ]
 
-            # 清理LLM输出中可能的格式问题
-            cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
-
-            sources_section = self._render_sources_section(sources)
-
-            # 构建报告尾部
-            footer_lines = ["", "---", ""]
-            provider = llm_analysis_result.get('provider')
-            model = llm_analysis_result.get('model')
-            if provider:
-                footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
-            
-            footer_lines.extend([
-                "",
-                "*本报告由AI自动生成，仅供参考*"
-            ])
-            footer_section = "\n".join(footer_lines)
-
-            report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
-
-            # 应用来源链接增强后处理
-            report_content = self._enhance_source_links(report_content, sources)
-
-        # 简单季度标题
-        q = (end_time.month - 1) // 3 + 1
-        title = f"即刻季度战略叙事 - {end_time.year} Q{q}"
-        report_row = {
-            'report_type': 'quarterly_narrative',
-            'scope': 'global',
-            'analysis_period_start': start_time,
-            'analysis_period_end': end_time,
-            'items_analyzed': len(posts),
-            'report_title': title,
-            'report_content': report_content,
-        }
-        report_id = self.db.save_report(report_row)
-
-        result = {
-            'success': True,
-            'report_id': report_id,
-            'items_analyzed': len(posts),
-            'title': title,
-        }
-
-        # 尝试推送到Notion
-        try:
-            from .notion_client import jike_notion_client
-
-            # 格式化Notion标题
-            beijing_time = self._bj_time()
-            notion_title = f"即刻季度战略叙事 - {end_time.year}Q{q} ({len(posts)}条动态)"
-
-            self.logger.info(f"开始推送季报到Notion: {notion_title}")
-
-            notion_result = jike_notion_client.create_report_page(
-                report_title=notion_title,
-                report_content=report_content,
-                report_date=beijing_time
-            )
-
-            if notion_result.get('success'):
-                self.logger.info(f"季报成功推送到Notion: {notion_result.get('page_url')}")
-                result['notion_push'] = {
-                    'success': True,
-                    'page_url': notion_result.get('page_url'),
-                    'path': notion_result.get('path')
-                }
-            else:
-                self.logger.warning(f"推送季报到Notion失败: {notion_result.get('error')}")
-                result['notion_push'] = {
-                    'success': False,
-                    'error': notion_result.get('error')
-                }
-
-        except Exception as e:
-            self.logger.warning(f"推送季报到Notion时出错: {e}")
-            result['notion_push'] = {
+        # 获取要使用的模型列表
+        models_to_generate = self._get_report_models()
+        if not models_to_generate:
+            self.logger.warning("未配置任何可用于生成报告的模型")
+            return {
                 'success': False,
-                'error': str(e)
+                'error': '未配置可用的LLM模型',
+                'items_analyzed': 0
             }
+
+        model_reports: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+
+        # 为每个模型生成报告
+        for model_name in models_to_generate:
+            display_name = self._get_model_display_name(model_name)
+            
+            self.logger.info(f"开始使用模型 {model_name} ({display_name}) 生成季报")
+            
+            llm_analysis_result = self._analyze_with_llm(content_md, self._prompt_weekly(), model_override=model_name)
+            
+            if not llm_analysis_result:
+                header = f"# 🚀 即刻季度战略叙事 - {display_name} (占位版)"
+                report_content = self._make_fallback_report(header, posts, start_time, end_time, sources)
+            else:
+                llm_output = llm_analysis_result.get('content', '')
+                # 为LLM生成的报告添加标准头部信息
+                beijing_time = self._bj_time()
+                q = (end_time.month - 1) // 3 + 1
+                header_info = [
+                    f"# 🚀 即刻季度战略叙事 - {display_name} - {end_time.year} Q{q}",
+                    "",
+                    f"*报告生成时间: {beijing_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*数据范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} - {end_time.strftime('%Y-%m-%d %H:%M:%S')}*  ",
+                    "",
+                    f"*分析动态数: {len(posts)} 条*",
+                    "",
+                    "---",
+                    ""
+                ]
+
+                # 清理LLM输出中可能的格式问题
+                cleaned_llm_output = self._clean_llm_output_for_notion(llm_output)
+
+                sources_section = self._render_sources_section(sources)
+
+                # 构建报告尾部
+                footer_lines = ["", "---", ""]
+                provider = llm_analysis_result.get('provider')
+                model = llm_analysis_result.get('model')
+                if provider:
+                    footer_lines.append(f"*分析引擎: {provider} ({model or 'unknown'})*")
+                
+                footer_lines.extend([
+                    "",
+                    "*本报告由AI自动生成，仅供参考*"
+                ])
+                footer_section = "\n".join(footer_lines)
+
+                report_content = "\n".join(header_info) + cleaned_llm_output + "\n\n" + sources_section + footer_section
+
+                # 应用来源链接增强后处理
+                report_content = self._enhance_source_links(report_content, sources)
+
+            # 简单季度标题
+            q = (end_time.month - 1) // 3 + 1
+            title = f"即刻季度战略叙事 - {display_name} - {end_time.year} Q{q}"
+            report_row = {
+                'report_type': 'quarterly_narrative',
+                'scope': 'global',
+                'analysis_period_start': start_time,
+                'analysis_period_end': end_time,
+                'items_analyzed': len(posts),
+                'report_title': title,
+                'report_content': report_content,
+            }
+            report_id = self.db.save_report(report_row)
+
+            model_report = {
+                'model': model_name,
+                'model_display': display_name,
+                'success': True,
+                'report_id': report_id,
+                'report_title': title,
+                'provider': llm_analysis_result.get('provider') if llm_analysis_result else None,
+                'items_analyzed': len(posts)
+            }
+
+            # 尝试推送到Notion
+            try:
+                from .notion_client import jike_notion_client
+
+                # 格式化Notion标题
+                beijing_time = self._bj_time()
+                notion_title = f"[{display_name}] 即刻季度战略叙事 - {end_time.year}Q{q} ({len(posts)}条动态)"
+
+                self.logger.info(f"开始推送季报到Notion ({display_name}): {notion_title}")
+
+                notion_result = jike_notion_client.create_report_page(
+                    report_title=notion_title,
+                    report_content=report_content,
+                    report_date=beijing_time
+                )
+
+                if notion_result.get('success'):
+                    self.logger.info(f"季报成功推送到Notion ({display_name}): {notion_result.get('page_url')}")
+                    model_report['notion_push'] = {
+                        'success': True,
+                        'page_url': notion_result.get('page_url'),
+                        'path': notion_result.get('path')
+                    }
+                else:
+                    self.logger.warning(f"推送季报到Notion失败 ({display_name}): {notion_result.get('error')}")
+                    model_report['notion_push'] = {
+                        'success': False,
+                        'error': notion_result.get('error')
+                    }
+
+            except Exception as e:
+                self.logger.warning(f"推送季报到Notion时出错 ({display_name}): {e}")
+                model_report['notion_push'] = {
+                    'success': False,
+                    'error': str(e)
+                }
+
+            model_reports.append(model_report)
+
+        # 构建最终结果
+        overall_success = len(model_reports) > 0
+        result = {
+            'success': overall_success,
+            'items_analyzed': len(posts) if overall_success else 0,
+            'model_reports': model_reports,
+            'failures': failures
+        }
+
+        if overall_success:
+            # 使用第一个成功的报告作为主要结果
+            primary_report = model_reports[0]
+            result['report_id'] = primary_report['report_id']
+            result['title'] = primary_report['report_title']
+            result['notion_push'] = primary_report.get('notion_push')
+            result['report_ids'] = [mr['report_id'] for mr in model_reports]
 
         return result
 
