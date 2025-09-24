@@ -593,7 +593,7 @@ def extract_image_urls_from_markdown(markdown_content: str) -> List[str]:
 
 def get_vlm_prompt(post_text: str) -> str:
     """
-    获取视觉多模态模型的提示词
+    获取视觉多模态模型的提示词 ('heavy' 模式)
 
     Args:
         post_text: Post文本内容
@@ -607,7 +607,7 @@ def get_vlm_prompt(post_text: str) -> str:
 你正在分析一条来自社交媒体的 post。这条 post 包含文本和一张或多张图片。你的任务是深度融合文本和图片信息，提取信息与价值。
 
 # Input:
-- Post 文本: "{post_text}"
+- Post 文本: ```{post_text}```
 - 图片: 参考附件
 
 # Your Task:
@@ -619,9 +619,31 @@ def get_vlm_prompt(post_text: str) -> str:
 严格遵循上述输出要求。"""
 
 
+def get_vlm_prompt_light(post_text: str) -> str:
+    """
+    获取视觉多模态模型的提示词 ('light' 模式)
+
+    Args:
+        post_text: Post文本内容
+
+    Returns:
+        格式化的提示词
+    """
+    return f"""# Context:
+你正在分析一条包含文本和图片的社交媒体post。你的任务是为其生成一个**图文综合摘要**。这个摘要将作为后续宏观分析的输入。
+
+# Input:
+- Post 文本: ```{post_text}```
+- 图片: 参考附件
+
+# Your Task:
+请仔细阅读Post文本和所有图片，综合深入理解后，输出一段“图文综合摘要”。
+"""
+
+
 def get_llm_prompt(post_text: str) -> str:
     """
-    获取纯文本模型的提示词
+    获取纯文本模型的提示词 ('heavy' 模式)
 
     Args:
         post_text: Post文本内容
@@ -647,6 +669,34 @@ def get_llm_prompt(post_text: str) -> str:
 严格遵循上述输出要求。"""
 
 
+def get_llm_prompt_light(post_text: str) -> str:
+    """
+    获取纯文本模型的提示词 ('light' 模式)
+
+    Args:
+        post_text: Post文本内容
+
+    Returns:
+        格式化的提示词
+    """
+    return f"""# Role: 社交媒体内容分析师
+
+# Context:
+你正在分析一条来自社交媒体的纯文本 post。你的任务是为其生成一个**核心内容摘要**。这个摘要将作为后续宏观分析的输入，因此**必须精炼且准确**。
+
+# Input:
+- Post 文本: ```{post_text}```
+
+# Your Task:
+请直接输出一段**不超过200字**的“核心价值摘要”。摘要应直接提炼出以下可能有的信息，无需分点罗列：
+- **核心议题**: 这篇Post在讨论什么？
+- **关键信息/观点**: 作者的核心观点或最有价值的信息是什么？（例如：是一个新工具、一个市场洞察、一个独特的个人思考？）
+- **情绪与意图**: 作者的情绪基调和可能的意图是什么？
+
+# Output Example:
+这篇Post的核心是关于[议题]，作者分享了[关键信息/观点]，认为[...观点...]。字里行间流露出[情绪]的情绪，似乎希望引发读者对[意图]的思考。"""
+
+
 class PostProcessor:
     """Post后处理器，负责智能解读和分析Post内容"""
 
@@ -666,6 +716,10 @@ class PostProcessor:
         self.fast_model = self.llm_config['fast_model_name']
         self.vlm_model = self.llm_config['fast_vlm_name']
 
+        # 获取分析模式配置
+        self.analysis_config = config.get_analysis_config()
+        self.interpretation_mode = self.analysis_config.get('interpretation_mode', 'light')
+
         # 获取并发配置
         executor_config = config.get_executor_config()
         self.fast_llm_workers = executor_config['fast_llm_workers']
@@ -673,6 +727,7 @@ class PostProcessor:
         self.image_processing_workers = executor_config['image_processing_workers']
 
         self.logger.info("Post处理器初始化完成")
+        self.logger.info(f"Post解读模式: {self.interpretation_mode}")
         self.logger.info(f"快速文本模型: {self.fast_model} (并发数: {self.fast_llm_workers})")
         self.logger.info(f"视觉多模态模型: {self.vlm_model} (并发数: {self.fast_vlm_workers})")
         self.logger.info(f"图像处理并发数: {self.image_processing_workers}")
@@ -1147,7 +1202,12 @@ class PostProcessor:
             self.logger.warning("没有有效的图片数据，无法调用VLM")
             return None
 
-        prompt = get_vlm_prompt(post_text)
+        if self.interpretation_mode == 'heavy':
+            prompt = get_vlm_prompt(post_text)
+            self.logger.debug("使用 'heavy' 模式的VLM prompt")
+        else:
+            prompt = get_vlm_prompt_light(post_text)
+            self.logger.debug("使用 'light' 模式的VLM prompt")
 
         try:
             png_count = sum(1 for img in image_data_list if img.get('type') == 'url')
@@ -1190,7 +1250,12 @@ class PostProcessor:
         Returns:
             LLM解读结果，失败时返回None
         """
-        prompt = get_llm_prompt(post_text)
+        if self.interpretation_mode == 'heavy':
+            prompt = get_llm_prompt(post_text)
+            self.logger.debug("使用 'heavy' 模式的LLM prompt")
+        else:
+            prompt = get_llm_prompt_light(post_text)
+            self.logger.debug("使用 'light' 模式的LLM prompt")
 
         try:
             # 调用快速模型

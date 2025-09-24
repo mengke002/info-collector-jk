@@ -264,7 +264,8 @@ class Config:
             'days_back_weekly': self._get_config_value('analysis', 'days_back_weekly', 'ANALYSIS_DAYS_BACK_WEEKLY', 7, int),
             'days_back_quarterly': self._get_config_value('analysis', 'days_back_quarterly', 'ANALYSIS_DAYS_BACK_QUARTERLY', 90, int),
             'days_back_kol': self._get_config_value('analysis', 'days_back_kol', 'ANALYSIS_DAYS_BACK_KOL', 30, int),
-            'kol_user_ids': kol_ids
+            'kol_user_ids': kol_ids,
+            'interpretation_mode': self._get_config_value('analysis', 'interpretation_mode', 'INTERPRETATION_MODE', 'light', str)
         }
 
     def get_notion_config(self) -> Dict[str, Any]:
