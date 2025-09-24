@@ -3,6 +3,8 @@ Task wrapper to run Jike collection and management tasks.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,22 @@ def _lazy_get_report_generator():
     return _gr()
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_async_result(value: Any) -> Any:
+    """Return awaitable results in a synchronous context."""
+    if inspect.isawaitable(value):
+        try:
+            return asyncio.run(value)
+        except RuntimeError as exc:
+            if 'asyncio.run() cannot be called from a running event loop' not in str(exc):
+                raise
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(value)
+            finally:
+                loop.close()
+    return value
 
 
 def run_crawl_task() -> Dict[str, Any]:
@@ -139,13 +157,21 @@ def run_report_task(report_type: str,
         # 延迟导入，避免在非报告类任务执行时编译 report_generator
         rg = _lazy_get_report_generator()
         if report_type == 'daily_hotspot':
-            return rg.generate_daily_hotspot(hours_back=hours_back)
+            return _resolve_async_result(
+                rg.generate_daily_hotspot(hours_back=hours_back)
+            )
         elif report_type == 'weekly_digest':
-            return rg.generate_weekly_digest(days_back=days_back)
+            return _resolve_async_result(
+                rg.generate_weekly_digest(days_back=days_back)
+            )
         elif report_type == 'kol_trajectory':
-            return rg.generate_kol_trajectory(kol_ids=kol_user_ids, days_back=days_back)
+            return _resolve_async_result(
+                rg.generate_kol_trajectory(kol_ids=kol_user_ids, days_back=days_back)
+            )
         elif report_type == 'quarterly_narrative':
-            return rg.generate_quarterly_narrative(days_back=days_back)
+            return _resolve_async_result(
+                rg.generate_quarterly_narrative(days_back=days_back)
+            )
         else:
             return {'success': False, 'error': f'未知报告类型: {report_type}'}
     except Exception as e:
