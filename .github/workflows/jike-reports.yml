@@ -6,10 +6,7 @@ on:
     - cron: '0 1,7,13 * * *'
     # 每周日 北京时间 08:00 生成周报（UTC: 0）
     - cron: '0 0 * * 0'
-    # 每月1日 北京时间 08:00 生成KOL月报（UTC: 0）
-    - cron: '0 0 1 * 2024'
-    # 每季度首月1日 北京时间 08:00 生成季度叙事（UTC: 0）
-    - cron: '0 0 1 1,4,7,10 2024'
+    # KOL 月报和季度叙事暂时仅支持手动触发
   workflow_dispatch:
     inputs:
       report_type:
@@ -112,7 +109,7 @@ jobs:
 
   report-kol:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 0 1 * 2024' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'kol_trajectory')
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'kol_trajectory'
     env:
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
@@ -150,7 +147,7 @@ jobs:
 
   report-quarterly:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 0 1 1,4,7,10 2024' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'quarterly_narrative')
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'quarterly_narrative'
     env:
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
