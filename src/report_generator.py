@@ -442,33 +442,32 @@ class JKReportGenerator:
 
     # ---------- 数据准备与格式化 ----------
     def _post_has_media(self, post: Dict[str, Any]) -> bool:
-        """判断帖子是否包含媒体内容（图片、视频等）"""
-        # 检查即刻特有的图片字段
-        pictures = post.get('pictures')
-        if pictures:
-            try:
-                if isinstance(pictures, str):
-                    import json
-                    parsed = json.loads(pictures)
-                else:
-                    parsed = pictures
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    return True
-            except (json.JSONDecodeError, TypeError):
-                pass
+        """判断帖子是否包含媒体内容（图片）"""
+        import re
 
-        # 检查其他可能的媒体字段
-        video = post.get('video')
-        if video:
-            return True
+        # 获取帖子内容
+        post_text = post.get('summary', '') or post.get('title', '')
+        if not post_text:
+            return False
 
-        # 检查是否有链接卡片（可能包含封面图）
-        link_title = post.get('link_title')
-        link_image = post.get('link_image_url')
-        if link_title or link_image:
-            return True
+        # 检查是否包含 Markdown 图片语法
+        img_pattern = r'!\[.*?\]\((https?://[^)]+)\)'
+        image_urls = re.findall(img_pattern, post_text)
 
-        return False
+        return len(image_urls) > 0
+
+    def _get_media_count(self, post: Dict[str, Any]) -> int:
+        """获取帖子中的图片数量"""
+        import re
+
+        post_text = post.get('summary', '') or post.get('title', '')
+        if not post_text:
+            return 0
+
+        img_pattern = r'!\[.*?\]\((https?://[^)]+)\)'
+        image_urls = re.findall(img_pattern, post_text)
+
+        return len(image_urls)
 
     def _clean_image_urls_from_content(self, content: str, media_count: int = 0) -> str:
         """
@@ -600,20 +599,7 @@ class JKReportGenerator:
             has_media = self._post_has_media(p)
 
             # 计算媒体数量
-            media_count = 0
-            if has_media:
-                pictures = p.get('pictures')
-                if pictures:
-                    try:
-                        if isinstance(pictures, str):
-                            import json
-                            parsed = json.loads(pictures)
-                        else:
-                            parsed = pictures
-                        if isinstance(parsed, list):
-                            media_count = len(parsed)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            media_count = self._get_media_count(p) if has_media else 0
 
             # 清理图片URL，压缩上下文
             summary = self._clean_image_urls_from_content(summary, media_count)
