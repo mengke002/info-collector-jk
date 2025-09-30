@@ -34,17 +34,17 @@ class JKReportGenerator:
         self.max_content_length = int(self.llm_cfg.get('max_content_length', 380000))
         self.max_llm_concurrency = 3  # 与linuxdo保持一致,不从[llm]读取
 
-        # 获取解读模式配置
-        context_mode = (self.analysis_cfg.get('interpretation_mode') if self.analysis_cfg else 'light') or 'light'
+        # 获取报告上下文模式配置（与post_processor的interpretation_mode独立）
+        context_mode = (self.analysis_cfg.get('report_context_mode') if self.analysis_cfg else 'light') or 'light'
         if not isinstance(context_mode, str):
             context_mode = 'light'
         context_mode = context_mode.lower()
         if context_mode not in {'light', 'full'}:
-            self.logger.warning(f"未知interpretation_mode配置: {context_mode}, 回退到light模式")
+            self.logger.warning(f"未知report_context_mode配置: {context_mode}, 回退到light模式")
             context_mode = 'light'
         self.context_mode = context_mode
 
-        self.logger.info(f"报告生成器初始化完成，context_mode={self.context_mode}")
+        self.logger.info(f"报告生成器初始化完成，report_context_mode={self.context_mode}")
 
     def _log_task_start(self, task_type: str, **kwargs) -> None:
         """统一的任务开始日志记录"""
