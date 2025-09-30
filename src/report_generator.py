@@ -34,6 +34,18 @@ class JKReportGenerator:
         self.max_content_length = int(self.llm_cfg.get('max_content_length', 380000))
         self.max_llm_concurrency = 3  # 与linuxdo保持一致,不从[llm]读取
 
+        # 获取解读模式配置
+        context_mode = (self.analysis_cfg.get('interpretation_mode') if self.analysis_cfg else 'light') or 'light'
+        if not isinstance(context_mode, str):
+            context_mode = 'light'
+        context_mode = context_mode.lower()
+        if context_mode not in {'light', 'full'}:
+            self.logger.warning(f"未知interpretation_mode配置: {context_mode}, 回退到light模式")
+            context_mode = 'light'
+        self.context_mode = context_mode
+
+        self.logger.info(f"报告生成器初始化完成，context_mode={self.context_mode}")
+
     def _log_task_start(self, task_type: str, **kwargs) -> None:
         """统一的任务开始日志记录"""
         details = ", ".join([f"{k}={v}" for k, v in kwargs.items()])
@@ -429,6 +441,80 @@ class JKReportGenerator:
         return model_report
 
     # ---------- 数据准备与格式化 ----------
+    def _post_has_media(self, post: Dict[str, Any]) -> bool:
+        """判断帖子是否包含媒体内容（图片、视频等）"""
+        # 检查即刻特有的图片字段
+        pictures = post.get('pictures')
+        if pictures:
+            try:
+                if isinstance(pictures, str):
+                    import json
+                    parsed = json.loads(pictures)
+                else:
+                    parsed = pictures
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    return True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 检查其他可能的媒体字段
+        video = post.get('video')
+        if video:
+            return True
+
+        # 检查是否有链接卡片（可能包含封面图）
+        link_title = post.get('link_title')
+        link_image = post.get('link_image_url')
+        if link_title or link_image:
+            return True
+
+        return False
+
+    def _clean_image_urls_from_content(self, content: str, media_count: int = 0) -> str:
+        """
+        清理帖子内容中的图片URL，替换为简短说明
+
+        Args:
+            content: 原始帖子内容
+            media_count: 图片数量
+
+        Returns:
+            清理后的内容
+        """
+        if not content:
+            return ""
+
+        import re
+
+        # 匹配markdown图片语法：![...](...) 或 ![](...)
+        # 以及各种图片URL模式
+        markdown_img_pattern = r'!\[.*?\]\([^\)]+\)'
+
+        # 移除所有markdown图片
+        cleaned = re.sub(markdown_img_pattern, '', content)
+
+        # 移除可能的图片URL（常见的图片域名）
+        img_url_patterns = [
+            r'https?://[^\s]*\.(?:jpg|jpeg|png|gif|webp|bmp)[^\s]*',
+            r'https?://img\.[^\s]+',
+            r'https?://image\.[^\s]+',
+            r'https?://pic\.[^\s]+',
+        ]
+
+        for pattern in img_url_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+        # 清理多余的空行（保留最多一个空行）
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        cleaned = cleaned.strip()
+
+        # 在内容开头添加简短的图片说明
+        if media_count > 0:
+            img_note = f"[附{media_count}张图]"
+            cleaned = f"{img_note}\n{cleaned}"
+
+        return cleaned
+
     def _truncate(self, text: str, max_len: int) -> str:
         if not text:
             return ""
@@ -483,7 +569,21 @@ class JKReportGenerator:
         return '\n'.join(processed_lines)
 
     def _format_posts_for_llm(self, posts: List[Dict[str, Any]], source_prefix: str = 'T') -> Tuple[str, List[Dict[str, Any]]]:
-        """将帖子格式化为带编号的Markdown文本，包含原始内容和解读信息，返回(文本, 源映射列表)"""
+        """
+        将帖子格式化为带编号的紧凑文本，根据context_mode和媒体情况智能包含解读信息
+
+        优化策略：
+        - light模式：仅对图文帖保留解读，纯文本帖只保留原文（压缩上下文）
+        - full模式：所有帖子都包含解读（保持完整信息）
+        - 清理图片URL，减少token消耗
+
+        Args:
+            posts: 帖子数据列表
+            source_prefix: 来源ID前缀
+
+        Returns:
+            (格式化后的文本, 源映射列表)
+        """
         lines: List[str] = []
         sources: List[Dict[str, Any]] = []
         total_chars = 0
@@ -492,58 +592,76 @@ class JKReportGenerator:
             sid = f"{source_prefix}{idx}"
             nickname = p.get('nickname') or p.get('jike_user_id') or '未知作者'
             link = p.get('link') or ''
-            title = p.get('title') or ''
+
+            # 获取原始内容
             summary = p.get('summary') or ''
-            pub = p.get('published_at')
-            pub_str = pub.strftime('%Y-%m-%d %H:%M') if pub else ''
+
+            # 检查是否有媒体
+            has_media = self._post_has_media(p)
+
+            # 计算媒体数量
+            media_count = 0
+            if has_media:
+                pictures = p.get('pictures')
+                if pictures:
+                    try:
+                        if isinstance(pictures, str):
+                            import json
+                            parsed = json.loads(pictures)
+                        else:
+                            parsed = pictures
+                        if isinstance(parsed, list):
+                            media_count = len(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            # 清理图片URL，压缩上下文
+            summary = self._clean_image_urls_from_content(summary, media_count)
+
+            # 决定是否包含解读
+            # light模式：只对有媒体的帖子包含解读
+            # full模式：所有帖子都包含解读
+            include_interpretation = (self.context_mode == 'full') or (self.context_mode == 'light' and has_media)
 
             # 获取解读信息
-            interpretation_text = p.get('interpretation_text') or ''
-            interpretation_model = p.get('interpretation_model') or ''
+            interpretation_text = ''
+            interpretation_model = ''
+            if include_interpretation:
+                interpretation_text = p.get('interpretation_text') or ''
+                interpretation_model = p.get('interpretation_model') or ''
 
-            # 每条摘要截断,避免单条过长
-            title_t = self._truncate(title, 140)
+            # 截断处理
             summary_t = self._truncate(summary, 1500)
-
-            # 解读内容截断
             interpretation_t = self._truncate(interpretation_text, 3000) if interpretation_text else ''
 
-            # 构建帖子块
-            block = [
-                f"### [{sid}] {title_t}",
-                f"- 作者: {nickname}",
-                f"- 时间: {pub_str}",
-                f"- 链接: {link}",
-                f"- 原始内容:\n{summary_t}"
-            ]
-
-            # 如果有解读内容，添加解读部分
-            if interpretation_text:
-                block.extend([
-                    f"- AI深度解读 (模型: {interpretation_model}):\n{interpretation_t}"
-                ])
+            # 构建紧凑的帖子块
+            if include_interpretation and interpretation_text:
+                # 有解读的格式：更紧凑
+                block = f"[{sid} @{nickname}]\n{summary_t}\n→ 洞察: {interpretation_t}"
             else:
-                block.extend([
-                    "- AI深度解读: 暂无"
-                ])
+                # 纯文本格式：极简
+                block = f"[{sid} @{nickname}]\n{summary_t}"
 
-            block.append("")  # 空行分隔
-
-            block_text = "\n".join(block)
-            if total_chars + len(block_text) > self.max_content_length:
+            # 检查长度限制
+            if total_chars + len(block) > self.max_content_length:
                 self.logger.info(f"达到最大内容限制({self.max_content_length}),截断帖子列表于第 {idx-1} 条")
                 break
-            lines.append(block_text)
-            total_chars += len(block_text)
+
+            lines.append(block)
+            total_chars += len(block)
+
+            # 构建来源映射（用于后续生成来源清单）
+            title = p.get('title') or ''
+            title_t = self._truncate(title, 140)
             sources.append({
                 'sid': sid,
-                'title': title_t,
+                'title': title_t or self._truncate(summary, 100),
                 'link': link,
                 'nickname': nickname,
                 'excerpt': self._truncate(summary, 120)
             })
 
-        return "\n".join(lines), sources
+        return "\n\n---\n\n".join(lines), sources
 
     def _format_daily_reports_for_weekly(self, daily_reports: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
         """将每日热点报告合成为周报输入上下文"""
@@ -661,22 +779,53 @@ class JKReportGenerator:
 
     # ---------- Prompt 模板 ----------
     def _prompt_daily(self) -> str:
-        return """# Role: 资深社区战略分析师
+        """构建日报提示词，根据context_mode调整数据格式说明"""
+
+        # 根据context_mode生成精确的数据格式描述
+        if self.context_mode == 'light':
+            data_format_description = """# Input Data Format:
+你将收到一系列经过预处理的帖子，采用紧凑格式以优化上下文。每条帖子包含原始文本内容；只有当帖子包含图片或多媒体时，才会额外附带AI深度洞察。
+
+**格式说明**：
+- 纯文本帖：`[T_id @user_handle]` + 换行 + 帖子原文
+- 图文帖：`[T_id @user_handle]` + 换行 + 帖子原文 + 换行 + `→ 洞察: {AI生成的综合解读}`
+
+**重要**：
+1. T_id 是来源标识符，你在分析中引用时使用 `[Source: T_id]` 格式
+2. 对于纯文本帖，请直接基于原文进行分析
+3. 对于图文帖，请综合原文和洞察内容进行分析"""
+        else:  # full mode
+            data_format_description = """# Input Data Format:
+你将收到一系列经过预处理的帖子，采用紧凑格式以优化上下文。每条帖子都包含原始内容和AI生成的深度洞察。
+
+**格式说明**：
+`[T_id @user_handle]` + 换行 + 帖子原文 + 换行 + `→ 洞察: {LLM生成的深度解读}`
+
+**重要**：
+1. T_id 是来源标识符，你在分析中引用时使用 `[Source: T_id]` 格式
+2. 请综合利用原文和洞察两部分信息进行分析
+3. 洞察部分是AI对帖子的深度解读，是你分析的核心依据"""
+
+        return f"""# Role: 资深社区战略分析师
 
 # Context:
-你正在分析一个由技术专家、产品经理、投资人和创业者组成的精英社区——'即刻'在过去24小时内发布的帖子。你的任务是基于我提供的、已编号的原始讨论材料和AI深度解读，撰写一份信息密度高、内容详尽、可读性强的情报简报。
+你正在分析一个由技术专家、产品经理、投资人和创业者组成的精英社区——'即刻'在过去24小时内发布的帖子。你的任务是基于我提供的、已编号的原始讨论材料和AI深度洞察（如有），撰写一份信息密度高、内容详尽、可读性强的情报简报。
 
 # Core Principles:
 1.  **价值导向与深度优先**: 你的核心目标是挖掘出对从业者有直接价值的信息。在撰写每个部分时，都应追求内容的**深度和完整性**，**避免过于简短的概括**。
-2.  **忠于原文与可追溯性 (CRITICAL)**: 所有分析都必须基于原文，并且每一条结论都必须在句末使用 `[Source: T_n]` 或 `[Sources: T_n, T_m]` 的格式明确标注来源。这是硬性要求,绝对不能遗漏。
-3.  **识别帖子类型**: 在分析时，请注意识别每个主题的潜在类型，例如：`[AI/前沿技术]`, `[产品与设计]`, `[创业与投资]`, `[个人成长与思考]`, `[行业与市场动态]`, `[工具与工作流分享]`等。这有助于你判断其核心价值。
+2.  **深度合成 (Deep Synthesis)**: 不要简单罗列。你需要将不同来源的信息点连接起来，构建成有意义的叙事（Narrative）。
+3.  **注入洞见 (Inject Insight)**: 你不是一个总结者，而是一个分析师。在陈述事实和观点的基础上，**必须**加入你自己的、基于上下文的、有深度的分析和评论。
+4.  **绝对可追溯 (Absolute Traceability)**: 你的每一条洞察、判断和建议，都必须在句末使用 `[Source: T_n]` 或 `[Sources: T_n, T_m]` 的格式明确标注信息来源。这是硬性要求,绝对不能遗漏。
+5.  **识别帖子类型**: 在分析时，请注意识别每个主题的潜在类型，例如：`[AI/前沿技术]`, `[产品与设计]`, `[创业与投资]`, `[个人成长与思考]`, `[行业与市场动态]`, `[工具与工作流分享]`等。这有助于你判断其核心价值。
 
 ---
 
-# Input Data:
-以下是即刻社区的帖子数据，每条帖子包含原始内容和AI深度解读（如有）。请综合利用原始内容和AI解读信息进行分析：
-# 帖子数据 (原始内容 + AI解读，已编号):
-{content}
+{data_format_description}
+
+---
+
+# Input Data (帖子数据，已编号):
+{{content}}
 
 ---
 
@@ -684,8 +833,8 @@ class JKReportGenerator:
 请严格按照以下结构和要求，生成一份内容丰富详实的完整Markdown报告。
 
 **第一部分：本时段焦点速报 (Top Topics Overview)**
-*   任务：通读所有材料，为每个值得关注的热门主题撰写一份**详细摘要**。
-*   要求：不仅要总结主题的核心内容，还要**尽可能列出主要的讨论方向和关键回复的观点**。篇幅无需严格限制，力求全面。
+*   任务：通读所有材料，为每个值得关注的核心主题撰写一份**详细摘要**。
+*   要求：不仅要总结主题的核心内容，还要**尽可能全面地**列出主要的讨论方向和关键观点。篇幅无需严格限制，力求全面。
 
 **第二部分：核心洞察与趋势 (Executive Summary & Trends)**
 *   任务：基于第一部分的所有信息，从全局视角提炼出关键洞察与趋势。
@@ -695,10 +844,10 @@ class JKReportGenerator:
     *   **社区热议与需求点**: **详细展开**社区普遍关心的话题、遇到的痛点或潜在的需求，说明其背景、当前讨论的焦点以及潜在的影响。
 
 **第三部分：价值信息挖掘 (Valuable Information Mining)**
-*   任务：深入挖掘帖子和回复中的高价值信息，并进行详细介绍。
+*   任务：深入挖掘帖子中的高价值信息，并进行详细介绍。
 *   要求：
-    *   **高价值资源/工具**: **详细列出并介绍**讨论中出现的可以直接使用的软件、库、API、开源项目或学习资料。包括资源的链接（如果原文提供）、用途和社区评价。
-    *   **有趣观点/深度讨论**: **详细阐述**那些引人深思、具有启发性的个人观点或高质量的讨论串。分析该观点为何重要或具有启发性，以及它引发了哪些后续讨论。
+    *   **高价值资源/工具**: **详细列出并介绍**讨论中出现的可以直接使用的软件、库、API、开源项目或学习资料。包括资源的用途和社区评价。
+    *   **有趣观点/深度讨论**: **详细阐述**那些引人深思、具有启发性的个人观点或高质量的讨论。分析该观点为何重要或具有启发性。
 
 **第四部分：行动建议 (Actionable Recommendations)**
 *   任务：基于以上所有分析，为社区中的不同角色提供丰富且具体的建议。
@@ -714,7 +863,7 @@ class JKReportGenerator:
 ## 一、本时段焦点速报
 
 ### **1. [主题A的标题]**
-*   **详细摘要**: [详细摘要该主题的核心内容，并列出主要的讨论方向和关键回复的观点。篇幅无需严格限制，力求全面。] [Source: T_n]
+*   **详细摘要**: [详细摘要该主题的核心内容，并列出主要的讨论方向和关键观点。篇幅无需严格限制，力求全面。] [Source: T_n]
 
 ### **2. [主题B的标题]**
 *   **详细摘要**: [同上。] [Source: T_m]
@@ -736,8 +885,8 @@ class JKReportGenerator:
     *   ...(尽可能多地列出技术/工具)
 
 *   **社区热议与需求点**:
-    *   **[热议话题A]**: [详细展开一个被广泛讨论的话题，例如“大模型在特定场景下的落地成本”，包括讨论的背景、各方观点、争议点以及对未来的展望。] [Source: T5]
-    *   **[普遍需求B]**: [详细总结一个普遍存在的需求，例如“需要更稳定、更便宜的GPU算力资源”，并分析该需求产生的原因和社区提出的潜在解决方案。] [Source: T10]
+    *   **[热议话题A]**: [详细展开一个被广泛讨论的话题，包括讨论的背景、各方观点、争议点以及对未来的展望。] [Source: T5]
+    *   **[普遍需求B]**: [详细总结一个普遍存在的需求，并分析该需求产生的原因和社区提出的潜在解决方案。] [Source: T10]
     *   ...(尽可能多地列出话题/需求)
 
 ---
@@ -745,13 +894,13 @@ class JKReportGenerator:
 ## 三、价值信息挖掘
 
 *   **高价值资源/工具**:
-    *   **[资源/工具A]**: [详细介绍该资源/工具，包括其名称、功能、优点、潜在缺点以及社区成员分享的使用技巧或经验。例如：`XX-Agent-Framework` - 一个用于快速构建AI Agent的开源框架，社区反馈其优点是上手快、文档全，但缺点是...。] [Source: T2]
+    *   **[资源/工具A]**: [详细介绍该资源/工具，包括其名称、功能、优点以及社区成员分享的使用技巧或经验。] [Source: T2]
     *   **[资源/工具B]**: [同上。] [Source: T8]
     *   ...(尽可能多地列出资源/工具)
 
 *   **有趣观点/深度讨论**:
-    *   **[关于“XX”的观点]**: [详细阐述一个有启发性的观点，分析其重要性，并总结因此引发的精彩后续讨论。例如：有用户认为，当前阶段的AI应用开发，工程化能力比算法创新更重要。这一观点引发了关于“算法工程师”与“AI应用工程师”职责边界的大量讨论，主流看法是...] [Source: T4]
-    *   **[关于“YY”的讨论]**: [同上。] [Source: T6]
+    *   **[关于"XX"的观点]**: [详细阐述一个有启发性的观点，分析其重要性，并总结因此引发的精彩讨论。] [Source: T4]
+    *   **[关于"YY"的讨论]**: [同上。] [Source: T6]
     *   ...(尽可能多地列出观点/讨论)
 
 ---
@@ -759,15 +908,15 @@ class JKReportGenerator:
 ## 四、行动建议
 
 *   **给产品经理的建议**:
-    *   [建议1：[提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。例如：建议关注社区中关于“用户体验断点”的讨论，这可能是下一个产品创新的切入点。] [Sources: T2, T9]
+    *   [建议1：[提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。] [Sources: T2, T9]
     *   [建议2：...]
 
 *   **给创业者/投资者的建议**:
-    *   [建议1. [提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。例如：社区对“小模型”的兴趣正在升温，这可能意味着在特定垂直领域存在新的创业机会。] [Source: T1]
+    *   [建议1：[提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。] [Source: T1]
     *   [建议2：...]
 
 *   **给技术从业者的建议**:
-    *   [建议1：[提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。例如：建议深入学习社区热议的 `XXX` 框架，掌握后能显著提升项目开发能力和求职竞争力。] [Source: T3]
+    *   [建议1：[提出具体建议]。理由与预期效果：[阐述该建议的逻辑依据，以及采纳后可能带来的好处]。] [Source: T3]
     *   [建议2：...]
 """
 
