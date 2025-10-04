@@ -114,7 +114,7 @@ class DatabaseManager:
                 """
                 CREATE TABLE IF NOT EXISTS jk_reports (
                     id INT AUTO_INCREMENT PRIMARY KEY,
-                    report_type ENUM('daily_hotspot','weekly_digest','kol_trajectory','quarterly_narrative') NOT NULL,
+                    report_type ENUM('daily_hotspot','daily_light','daily_deep','weekly_digest','kol_trajectory','quarterly_narrative') NOT NULL,
                     scope VARCHAR(128) DEFAULT NULL COMMENT '如kol为用户ID或昵称，其他为global',
                     analysis_period_start DATETIME NOT NULL,
                     analysis_period_end DATETIME NOT NULL,
