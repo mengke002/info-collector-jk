@@ -115,10 +115,24 @@ class JKReportGenerator:
         lower_name = model_name.lower()
         if 'gemini' in lower_name:
             return 'Gemini'
-        if 'glm' in lower_name and '4.5' in lower_name:
-            return 'GLM4.5'
+        if 'deepseek' in lower_name:
+            return 'DeepSeek'
+        if 'grok' in lower_name:
+            return 'Grok'
+        # GLM模型识别：通用提取版本号（如GLM-4.5、GLM-4.6、GLM-4v等）
         if 'glm' in lower_name:
-            return 'GLM'
+            import re
+            # 匹配 GLM-数字.数字 或 GLM-数字v 等格式
+            match = re.search(r'glm[- ]?(\d+\.?\d*v?)', lower_name)
+            if match:
+                version = match.group(1)
+                return f'GLM{version}'
+            else:
+                return 'GLM'
+        if 'gpt' in lower_name:
+            return 'GPT'
+        if 'claude' in lower_name:
+            return 'Claude'
 
         return model_name
 
