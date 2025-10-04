@@ -19,6 +19,16 @@ on:
         - weekly_digest
         - kol_trajectory
         - quarterly_narrative
+      report_flow:
+        description: '日报生成流程 (仅daily_hotspot有效)'
+        required: false
+        default: 'dual'
+        type: choice
+        options:
+        - dual
+        - light
+        - deep
+        - intelligence
       hours_back:
         description: '回溯小时（仅用于daily）'
         required: false
@@ -65,9 +75,9 @@ jobs:
     - name: Generate daily hotspot report
       run: |
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then \
-          python main.py --task report --report-type daily_hotspot --hours-back ${{ github.event.inputs.hours_back }}; \
+          python main.py --task report --report-type daily_hotspot --hours-back ${{ github.event.inputs.hours_back }} --flow ${{ github.event.inputs.report_flow || 'dual' }}; \
         else \
-          python main.py --task report --report-type daily_hotspot; \
+          python main.py --task report --report-type daily_hotspot --flow dual; \
         fi
 
   report-weekly:

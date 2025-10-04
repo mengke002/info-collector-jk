@@ -146,20 +146,33 @@ def run_postprocess_task(hours_back: int = None) -> Dict[str, Any]:
 def run_report_task(report_type: str,
                     hours_back: Optional[int] = None,
                     days_back: Optional[int] = None,
-                    kol_user_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                    kol_user_ids: Optional[List[str]] = None,
+                    flow: str = 'dual') -> Dict[str, Any]:
     """执行报告生成任务
     report_type: daily_hotspot | weekly_digest | kol_trajectory | quarterly_narrative
+    flow: dual | light | deep | intelligence (仅用于daily_hotspot)
     """
-    logger.info(f"开始执行报告任务: {report_type}")
+    logger.info(f"开始执行报告任务: {report_type}, flow: {flow}")
     try:
         # 初始化数据库（确保表存在）
         _ = DatabaseManager(config)
         # 延迟导入，避免在非报告类任务执行时编译 report_generator
         rg = _lazy_get_report_generator()
         if report_type == 'daily_hotspot':
-            return _resolve_async_result(
-                rg.generate_daily_hotspot(hours_back=hours_back)
-            )
+            # 根据flow参数选择不同的生成方式
+            if flow == 'dual':
+                from .report_generator import run_dual_reports
+                return run_dual_reports(hours=hours_back)
+            elif flow == 'light':
+                from .report_generator import run_light_reports
+                return run_light_reports(hours=hours_back)
+            elif flow == 'deep':
+                from .report_generator import run_deep_reports
+                return run_deep_reports(hours=hours_back)
+            else:  # 'intelligence' 或默认值 - 使用旧的单轨多模型并行逻辑
+                return _resolve_async_result(
+                    rg.generate_daily_hotspot(hours_back=hours_back)
+                )
         elif report_type == 'weekly_digest':
             return _resolve_async_result(
                 rg.generate_weekly_digest(days_back=days_back)

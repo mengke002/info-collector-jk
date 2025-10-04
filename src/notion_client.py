@@ -913,9 +913,161 @@ class JikeNotionClient:
             self.logger.error(f"追加内容块时出错: {e}")
             return {"success": False, "error": str(e)}
 
+    def find_or_create_report_type_folder(self, day_page_id: str, report_type: str) -> Optional[str]:
+        """在日期页面下查找或创建报告类型文件夹（日报资讯/深度洞察）
+
+        Args:
+            day_page_id: 日期页面ID
+            report_type: 'light' 或 'deep'
+
+        Returns:
+            文件夹页面ID，失败返回None
+        """
+        try:
+            # 确定文件夹名称
+            folder_name = "日报资讯" if report_type == 'light' else "深度洞察"
+
+            # 获取日期页面的子页面
+            children_result = self.get_page_children(day_page_id)
+            if not children_result.get("success"):
+                self.logger.error(f"获取日期页面子页面失败: {children_result.get('error')}")
+                return None
+
+            # 查找文件夹页面
+            for child in children_result["data"].get("results", []):
+                if child.get("type") == "child_page":
+                    page_title = self._extract_page_title(child)
+                    if page_title == folder_name:
+                        return child["id"]
+
+            # 创建文件夹页面
+            self.logger.info(f"创建报告类型文件夹: {folder_name}")
+            create_result = self.create_page(day_page_id, folder_name)
+            if create_result.get("success"):
+                return create_result["data"]["id"]
+            else:
+                self.logger.error(f"创建报告类型文件夹失败: {create_result.get('error')}")
+                return None
+
+        except Exception as e:
+            self.logger.error(f"查找或创建报告类型文件夹时出错: {e}")
+            return None
+
+    def create_report_page_in_hierarchy(self, report_title: str, report_content: str,
+                                       report_date: datetime, report_type: str = 'deep') -> Dict[str, Any]:
+        """创建报告页面，支持双轨制层级结构（年/月/日/报告类型文件夹/报告）
+
+        Args:
+            report_title: 报告标题
+            report_content: 报告内容
+            report_date: 报告日期
+            report_type: 'light' (日报资讯) 或 'deep' (深度洞察)
+
+        Returns:
+            创建结果
+        """
+        try:
+            if not self.integration_token or not self.parent_page_id:
+                return {
+                    "success": False,
+                    "error": "Notion配置不完整"
+                }
+
+            year = str(report_date.year)
+            month = f"{report_date.month:02d}月"
+            day = f"{report_date.day:02d}日"
+
+            folder_name = "日报资讯" if report_type == 'light' else "深度洞察"
+
+            self.logger.info(f"开始创建{folder_name}报告页面: {year}/{month}/{day}/{folder_name} - {report_title}")
+
+            # 1. 查找或创建年份页面
+            year_page_id = self.find_or_create_year_page(year)
+            if not year_page_id:
+                return {"success": False, "error": "无法创建年份页面"}
+
+            # 2. 查找或创建月份页面
+            month_page_id = self.find_or_create_month_page(year_page_id, month)
+            if not month_page_id:
+                return {"success": False, "error": "无法创建月份页面"}
+
+            # 3. 查找或创建日期页面
+            day_page_id = self.find_or_create_day_page(month_page_id, day)
+            if not day_page_id:
+                return {"success": False, "error": "无法创建日期页面"}
+
+            # 4. 查找或创建报告类型文件夹
+            folder_page_id = self.find_or_create_report_type_folder(day_page_id, report_type)
+            if not folder_page_id:
+                return {"success": False, "error": f"无法创建{folder_name}文件夹"}
+
+            # 5. 检查报告是否已经存在
+            existing_report = self.check_report_exists(folder_page_id, report_title)
+            if existing_report and existing_report.get("exists"):
+                self.logger.info(f"报告已存在，跳过创建: {existing_report.get('page_url')}")
+                return {
+                    "success": True,
+                    "page_id": existing_report.get("page_id"),
+                    "page_url": existing_report.get("page_url"),
+                    "path": f"{year}/{month}/{day}/{folder_name}/{report_title}",
+                    "skipped": True,
+                    "reason": "报告已存在"
+                }
+
+            # 6. 在文件夹下创建报告页面
+            content_blocks = self.markdown_to_notion_blocks(report_content)
+
+            # 限制块数量
+            max_blocks = 1000
+            if len(content_blocks) > max_blocks:
+                self.logger.warning(f"报告内容过长({len(content_blocks)}个块)，截断到{max_blocks}个块")
+                content_blocks = content_blocks[:max_blocks]
+                content_blocks.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [{
+                            "type": "text",
+                            "text": {"content": "⚠️ 内容过长已截断，完整内容请查看数据库记录"},
+                            "annotations": {"italic": True, "color": "gray"}
+                        }]
+                    }
+                })
+
+            # 验证并修复内容块
+            validated_blocks = self._validate_and_fix_content_blocks(content_blocks)
+            self.logger.info(f"内容验证完成: {len(validated_blocks)}/{len(content_blocks)} 个块通过验证")
+
+            # 创建页面
+            initial_block_limit = 50
+            if len(validated_blocks) <= initial_block_limit:
+                create_result = self.create_page(folder_page_id, report_title, validated_blocks)
+            else:
+                create_result = self._create_large_content_page(folder_page_id, report_title, validated_blocks)
+
+            if create_result.get("success"):
+                page_id = create_result["data"]["id"]
+                page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+
+                self.logger.info(f"{folder_name}报告页面创建成功: {page_url}")
+                return {
+                    "success": True,
+                    "page_id": page_id,
+                    "page_url": page_url,
+                    "path": f"{year}/{month}/{day}/{folder_name}/{report_title}",
+                    "report_type": report_type
+                }
+            else:
+                self.logger.error(f"创建{folder_name}报告页面失败: {create_result.get('error')}")
+                return {"success": False, "error": create_result.get("error")}
+
+        except Exception as e:
+            self.logger.error(f"创建{report_type}报告页面时出错: {e}")
+            return {"success": False, "error": str(e)}
+
     def create_report_page(self, report_title: str, report_content: str,
                           report_date: datetime = None) -> Dict[str, Any]:
-        """创建报告页面，按年/月/日层级组织"""
+        """创建报告页面，按年/月/日层级组织（兼容不使用文件夹分类的版本）"""
         try:
             if not self.integration_token or not self.parent_page_id:
                 return {

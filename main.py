@@ -42,6 +42,10 @@ def main():
     # 报告任务参数
     parser.add_argument('--report-type', choices=['daily_hotspot','weekly_digest','kol_trajectory','quarterly_narrative'],
                        help='报告类型（用于 --task report）')
+    parser.add_argument('--flow',
+                       choices=['dual', 'light', 'deep', 'intelligence'],
+                       default='dual',
+                       help='报告生成流程 (仅用于 daily_hotspot 类型)')
     parser.add_argument('--hours-back', type=int, help='回溯小时数（用于daily或postprocess）')
     parser.add_argument('--days-back', type=int, help='回溯天数（用于weekly/quarterly/kol）')
     parser.add_argument('--kol-user-ids', type=str, help='KOL用户ID列表，逗号分隔（用于kol_trajectory）')
@@ -82,6 +86,7 @@ def main():
             hours_back=args.hours_back,
             days_back=args.days_back,
             kol_user_ids=kol_ids,
+            flow=args.flow,
         )
     elif args.task == 'full':
         result = run_full_task()
