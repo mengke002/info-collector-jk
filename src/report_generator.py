@@ -786,11 +786,11 @@ class JKReportGenerator:
             data_format_description = """# Input Data Format:
 你将收到一系列经过预处理的帖子。纯文本帖只包含原文；图文帖会额外附带AI生成的`→ 洞察:`。
 - 纯文本帖: `[T_id @user_handle]` + 帖子原文
-- 图文帖: `[T_id @user_handle]` + 帖子原文 + `→ 洞察: {AI解读}`"""
+- 图文帖: `[T_id @user_handle]` + 帖子原文 + `→ 洞察: {{AI解读}}`"""
         else:  # full mode
             data_format_description = """# Input Data Format:
 你将收到一系列经过预处理的帖子。每条帖子都包含原文和AI生成的`→ 洞察:`。
-- 格式: `[T_id @user_handle]` + 帖子原文 + `→ 洞察: {AI解读}`"""
+- 格式: `[T_id @user_handle]` + 帖子原文 + `→ 洞察: {{AI解读}}`"""
 
         return f"""# Role: 资深科技社区分析师，专注于从即刻社区发掘价值信息
 
