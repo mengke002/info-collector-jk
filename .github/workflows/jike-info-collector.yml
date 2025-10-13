@@ -156,6 +156,7 @@ jobs:
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       LLM_REPORT_MODELS: ${{ secrets.LLM_REPORT_MODELS }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      LLM_MAX_TOKENS: ${{ secrets.LLM_MAX_TOKENS }}
       LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
       LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
 
@@ -211,6 +212,7 @@ jobs:
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       LLM_REPORT_MODELS: ${{ secrets.LLM_REPORT_MODELS }}
       LLM_MAX_CONTENT_LENGTH: ${{ secrets.LLM_MAX_CONTENT_LENGTH }}
+      LLM_MAX_TOKENS: ${{ secrets.LLM_MAX_TOKENS }}
       LLM_FAST_MODEL_NAME: ${{ secrets.LLM_FAST_MODEL_NAME }}
       LLM_FAST_VLM_NAME: ${{ secrets.LLM_FAST_VLM_NAME }}
 

@@ -502,9 +502,10 @@ class JikeNotionClient:
         processed_lines = i - start_index
         return children, processed_lines
 
-    def markdown_to_notion_blocks(self, markdown_content: str) -> List[Dict]:
-        """将Markdown内容转换为Notion块，支持链接和格式"""
+    def markdown_to_notion_blocks(self, markdown_content: str) -> tuple[List[Dict], List[Dict]]:
+        """将Markdown内容转换为Notion块，支持链接、格式和表格"""
         blocks = []
+        tables_to_add = []  # 用于跟踪需要添加的表格
         lines = markdown_content.split('\n')
 
         i = 0
@@ -554,12 +555,39 @@ class JikeNotionClient:
                     list_blocks, skip_lines = self._parse_list_items(lines, i)
                     blocks.extend(list_blocks)
                     i += skip_lines - 1  # -1 因为外层循环会+1
+                # 表格处理 - 新增表格支持
+                elif '|' in line and line.count('|') >= 2:
+                    # 收集完整的表格
+                    table_lines = []
+                    table_start = i
+
+                    # 收集所有表格行
+                    while i < len(lines):
+                        current_line = lines[i].strip()
+                        if '|' in current_line and current_line.count('|') >= 2:
+                            table_lines.append(current_line)
+                        elif current_line == '':
+                            # 空行，继续收集
+                            pass
+                        else:
+                            # 非表格行，退出
+                            break
+                        i += 1
+
+                    # 回退一行，因为外层循环会自增
+                    i -= 1
+
+                    # 处理收集到的表格
+                    if table_lines:
+                        self._process_table_to_blocks(table_lines, blocks, tables_to_add)
+
+                    continue
                 # 普通段落
                 else:
                     # 处理可能的多行段落
                     paragraph_lines = [line]
                     j = i + 1
-                    while j < len(lines) and lines[j].strip() and not lines[j].startswith(('#', '---')) and not (lines[j].startswith(('- ', '* ')) or (lines[j].startswith(' ') and lines[j].lstrip().startswith(('- ', '* ')))):
+                    while j < len(lines) and lines[j].strip() and not lines[j].startswith(('#', '---')) and not (lines[j].startswith(('- ', '* ')) or (lines[j].startswith(' ') and lines[j].lstrip().startswith(('- ', '* ')))) and '|' not in lines[j]:
                         paragraph_lines.append(lines[j].strip())
                         j += 1
 
@@ -588,7 +616,246 @@ class JikeNotionClient:
 
             i += 1
 
-        return blocks
+        return blocks, tables_to_add
+
+    def _process_table_to_blocks(self, table_lines: List[str], blocks: List[Dict], tables_to_add: List[Dict]):
+        """将表格行转换为 Notion 真实表格"""
+        if not table_lines:
+            return
+
+        # 解析表格数据
+        table_rows = []
+        headers = None
+
+        for line in table_lines:
+            # 清理表格行
+            cleaned_line = line.strip()
+            if not cleaned_line:
+                continue
+
+            # 跳过分隔行 (如 |---|---|---|)
+            cells_check = [cell.strip() for cell in cleaned_line.split('|')[1:-1]]
+            is_separator = True
+            for cell in cells_check:
+                if cell and not all(c in '-: ' for c in cell):
+                    is_separator = False
+                    break
+
+            if is_separator and cells_check:
+                continue
+
+            # 分割单元格
+            cells = [cell.strip() for cell in cleaned_line.split('|')[1:-1]]
+
+            if cells and any(cell for cell in cells):
+                if headers is None:
+                    headers = cells
+                else:
+                    table_rows.append(cells)
+
+        # 如果没有有效数据，跳过
+        if not headers or not table_rows:
+            return
+
+        # 对于大表格（>99行），分块处理
+        if len(table_rows) > 99:
+            self.logger.info(f"表格行数({len(table_rows)})超过Notion限制，将分块显示")
+            self._create_chunked_tables(headers, table_rows, blocks, 99, tables_to_add)
+        else:
+            # 创建单个表格
+            self._create_single_notion_table(headers, table_rows, blocks, tables_to_add)
+
+    def _create_single_notion_table(self, headers: List[str], table_rows: List[List[str]], blocks: List[Dict], tables_to_add: List[Dict]):
+        """创建单个Notion原生表格"""
+        try:
+            self.logger.info(f"准备创建Notion真实表格（{len(table_rows)}行数据）")
+
+            # 添加表格占位符
+            table_placeholder = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": f"📊 表格数据（{len(table_rows)}行，{len(headers)}列）"},
+                        "annotations": {"bold": True, "color": "blue"}
+                    }]
+                }
+            }
+            blocks.append(table_placeholder)
+
+            # 记录表格信息到单独的列表中
+            tables_to_add.append({
+                "headers": headers,
+                "rows": table_rows,
+                "placeholder_index": len(blocks) - 1
+            })
+
+        except Exception as e:
+            self.logger.error(f"准备表格创建失败: {e}")
+            self._create_table_as_code_block(headers, table_rows, blocks)
+
+    def _create_table_as_code_block(self, headers: List[str], table_rows: List[List[str]], blocks: List[Dict]):
+        """将表格转换为代码块显示（回退方案）"""
+        try:
+            table_text = ""
+            header_line = "| " + " | ".join(headers) + " |"
+            separator_line = "|" + "|".join(["-" * (len(h) + 2) for h in headers]) + "|"
+            table_text += header_line + "\n" + separator_line + "\n"
+
+            for row in table_rows:
+                while len(row) < len(headers):
+                    row.append("")
+                display_row = []
+                for cell in row[:len(headers)]:
+                    cell_content = cell or ""
+                    if len(cell_content) > 100:
+                        cell_content = cell_content[:97] + "..."
+                    display_row.append(cell_content)
+                row_line = "| " + " | ".join(display_row) + " |"
+                table_text += row_line + "\n"
+
+            blocks.append({
+                "object": "block",
+                "type": "code",
+                "code": {
+                    "caption": [],
+                    "rich_text": [{"type": "text", "text": {"content": table_text}}],
+                    "language": "markdown"
+                }
+            })
+
+        except Exception as e:
+            self.logger.error(f"创建表格代码块失败: {e}")
+
+    def _create_chunked_tables(self, headers: List[str], table_rows: List[List[str]], blocks: List[Dict], chunk_size: int, tables_to_add: List[Dict]):
+        """将大表格分成多个小表格显示"""
+        total_rows = len(table_rows)
+        chunks = [table_rows[i:i + chunk_size] for i in range(0, total_rows, chunk_size)]
+
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{
+                    "type": "text",
+                    "text": {"content": f"📊 表格包含 {total_rows} 行，分为 {len(chunks)} 个部分显示："},
+                    "annotations": {"bold": True}
+                }]
+            }
+        })
+
+        for chunk_idx, chunk in enumerate(chunks):
+            blocks.append({
+                "object": "block",
+                "type": "heading_3",
+                "heading_3": {
+                    "rich_text": [{
+                        "type": "text",
+                        "text": {"content": f"第 {chunk_idx + 1} 部分 (第 {chunk_idx * chunk_size + 1}-{min((chunk_idx + 1) * chunk_size, total_rows)} 行)"}
+                    }]
+                }
+            })
+            self._create_single_notion_table(headers, chunk, blocks, tables_to_add)
+
+    def _parse_table_cell_content(self, cell_content: str) -> List[Dict]:
+        """解析表格单元格内容，支持链接和格式"""
+        if not cell_content:
+            return [{"type": "text", "text": {"content": ""}}]
+
+        import re
+        link_pattern = r'\[([^\]]+)\]\((https?://[^)]+)\)'
+        rich_text = []
+        last_end = 0
+
+        for match in re.finditer(link_pattern, cell_content):
+            if match.start() > last_end:
+                before_text = cell_content[last_end:match.start()]
+                if before_text:
+                    rich_text.append({"type": "text", "text": {"content": before_text}})
+
+            link_text = match.group(1)
+            link_url = match.group(2)
+            rich_text.append({
+                "type": "text",
+                "text": {"content": link_text, "link": {"url": link_url}}
+            })
+            last_end = match.end()
+
+        if last_end < len(cell_content):
+            remaining_text = cell_content[last_end:]
+            if remaining_text:
+                rich_text.append({"type": "text", "text": {"content": remaining_text}})
+
+        if not rich_text:
+            rich_text = [{"type": "text", "text": {"content": cell_content}}]
+
+        return rich_text
+
+    def _add_real_table_to_page(self, page_id: str, headers: List[str], table_rows: List[List[str]]) -> bool:
+        """向已创建的页面添加真实表格"""
+        try:
+            max_rows = 99
+            if len(table_rows) > max_rows:
+                self.logger.info(f"表格行数({len(table_rows)})超过Notion限制({max_rows})，只添加前{max_rows}行")
+                table_rows = table_rows[:max_rows]
+
+            table_children = []
+
+            # 添加标题行
+            header_cells = []
+            for header in headers:
+                header_rich_text = self._parse_table_cell_content(header or "")
+                header_cells.append(header_rich_text)
+
+            table_children.append({
+                "type": "table_row",
+                "table_row": {"cells": header_cells}
+            })
+
+            # 添加数据行
+            for row in table_rows:
+                while len(row) < len(headers):
+                    row.append("")
+
+                row_cells = []
+                for cell in row[:len(headers)]:
+                    cell_content = cell or ""
+                    if len(cell_content) > 200:
+                        cell_content = cell_content[:197] + "..."
+                    cell_rich_text = self._parse_table_cell_content(cell_content)
+                    row_cells.append(cell_rich_text)
+
+                table_children.append({
+                    "type": "table_row",
+                    "table_row": {"cells": row_cells}
+                })
+
+            # 构建API请求
+            table_block = {
+                "children": [{
+                    "object": "block",
+                    "type": "table",
+                    "table": {
+                        "table_width": len(headers),
+                        "has_column_header": True,
+                        "has_row_header": False,
+                        "children": table_children
+                    }
+                }]
+            }
+
+            result = self._make_request("PATCH", f"blocks/{page_id}/children", table_block)
+            if result.get("success"):
+                self.logger.info(f"真实表格添加成功 ({len(table_rows)}行数据)")
+                return True
+            else:
+                self.logger.error(f"添加真实表格失败: {result.get('error')}")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"添加真实表格时出现异常: {e}")
+            return False
 
     def _validate_and_fix_content_blocks(self, blocks: List[Dict]) -> List[Dict]:
         """验证并修复内容块，处理长度超限问题，不截断内容"""
@@ -914,18 +1181,23 @@ class JikeNotionClient:
             return {"success": False, "error": str(e)}
 
     def find_or_create_report_type_folder(self, day_page_id: str, report_type: str) -> Optional[str]:
-        """在日期页面下查找或创建报告类型文件夹（日报资讯/深度洞察）
+        """在日期页面下查找或创建报告类型文件夹（日报资讯/深度洞察/周度报告）
 
         Args:
             day_page_id: 日期页面ID
-            report_type: 'light' 或 'deep'
+            report_type: 'light' (日报资讯) 或 'deep' (深度洞察) 或 'weekly' (周度报告)
 
         Returns:
             文件夹页面ID，失败返回None
         """
         try:
             # 确定文件夹名称
-            folder_name = "日报资讯" if report_type == 'light' else "深度洞察"
+            folder_name_map = {
+                'light': '日报资讯',
+                'deep': '深度洞察',
+                'weekly': '周度报告'
+            }
+            folder_name = folder_name_map.get(report_type, '未知类型')
 
             # 获取日期页面的子页面
             children_result = self.get_page_children(day_page_id)
@@ -955,13 +1227,13 @@ class JikeNotionClient:
 
     def create_report_page_in_hierarchy(self, report_title: str, report_content: str,
                                        report_date: datetime, report_type: str = 'deep') -> Dict[str, Any]:
-        """创建报告页面，支持双轨制层级结构（年/月/日/报告类型文件夹/报告）
+        """创建报告页面，支持多轨制层级结构（年/月/日/报告类型文件夹/报告）
 
         Args:
             report_title: 报告标题
             report_content: 报告内容
             report_date: 报告日期
-            report_type: 'light' (日报资讯) 或 'deep' (深度洞察)
+            report_type: 'light' (日报资讯) 或 'deep' (深度洞察) 或 'weekly' (周度报告)
 
         Returns:
             创建结果
@@ -977,7 +1249,12 @@ class JikeNotionClient:
             month = f"{report_date.month:02d}月"
             day = f"{report_date.day:02d}日"
 
-            folder_name = "日报资讯" if report_type == 'light' else "深度洞察"
+            folder_name_map = {
+                'light': '日报资讯',
+                'deep': '深度洞察',
+                'weekly': '周度报告'
+            }
+            folder_name = folder_name_map.get(report_type, '未知类型')
 
             self.logger.info(f"开始创建{folder_name}报告页面: {year}/{month}/{day}/{folder_name} - {report_title}")
 
@@ -1015,7 +1292,7 @@ class JikeNotionClient:
                 }
 
             # 6. 在文件夹下创建报告页面
-            content_blocks = self.markdown_to_notion_blocks(report_content)
+            content_blocks, tables_to_add = self.markdown_to_notion_blocks(report_content)
 
             # 限制块数量
             max_blocks = 1000
@@ -1048,6 +1325,23 @@ class JikeNotionClient:
             if create_result.get("success"):
                 page_id = create_result["data"]["id"]
                 page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+
+                # 检查是否有需要添加的表格
+                if tables_to_add:
+                    self.logger.info(f"页面创建成功，开始添加 {len(tables_to_add)} 个真实表格")
+                    success_count = 0
+                    for i, table_info in enumerate(tables_to_add):
+                        try:
+                            if self._add_real_table_to_page(page_id, table_info["headers"], table_info["rows"]):
+                                success_count += 1
+                                self.logger.info(f"真实表格 {i+1}/{len(tables_to_add)} 添加成功")
+                            else:
+                                self.logger.warning(f"真实表格 {i+1}/{len(tables_to_add)} 添加失败，但页面已创建")
+                        except Exception as e:
+                            self.logger.error(f"添加真实表格 {i+1} 时出错: {e}")
+
+                    if success_count > 0:
+                        self.logger.info(f"成功添加 {success_count}/{len(tables_to_add)} 个真实表格")
 
                 self.logger.info(f"{folder_name}报告页面创建成功: {page_url}")
                 return {
@@ -1114,7 +1408,7 @@ class JikeNotionClient:
                 }
 
             # 4. 在日期页面下创建报告页面
-            content_blocks = self.markdown_to_notion_blocks(report_content)
+            content_blocks, tables_to_add = self.markdown_to_notion_blocks(report_content)
 
             # 虽然API单次请求限制100块，但我们可以分批处理更多内容
             max_blocks = 1000
@@ -1154,6 +1448,23 @@ class JikeNotionClient:
             if create_result.get("success"):
                 page_id = create_result["data"]["id"]
                 page_url = f"https://www.notion.so/{page_id.replace('-', '')}"
+
+                # 检查是否有需要添加的表格
+                if tables_to_add:
+                    self.logger.info(f"页面创建成功，开始添加 {len(tables_to_add)} 个真实表格")
+                    success_count = 0
+                    for i, table_info in enumerate(tables_to_add):
+                        try:
+                            if self._add_real_table_to_page(page_id, table_info["headers"], table_info["rows"]):
+                                success_count += 1
+                                self.logger.info(f"真实表格 {i+1}/{len(tables_to_add)} 添加成功")
+                            else:
+                                self.logger.warning(f"真实表格 {i+1}/{len(tables_to_add)} 添加失败，但页面已创建")
+                        except Exception as e:
+                            self.logger.error(f"添加真实表格 {i+1} 时出错: {e}")
+
+                    if success_count > 0:
+                        self.logger.info(f"成功添加 {success_count}/{len(tables_to_add)} 个真实表格")
 
                 self.logger.info(f"报告页面创建成功: {page_url}")
                 return {

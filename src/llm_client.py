@@ -27,6 +27,7 @@ class LLMClient:
         # 获取不同类型的模型配置
         self.fast_model = llm_config.get('fast_model_name', 'gpt-4.1')
         self.vlm_model = llm_config.get('fast_vlm_name', 'gpt-4.1')
+        self.max_tokens = llm_config.get('max_tokens', 20000)
 
         models = llm_config.get('report_models') or []
         self.models = [m for m in models if isinstance(m, str) and m.strip()]
@@ -287,6 +288,7 @@ class LLMClient:
                         {'role': 'user', 'content': prompt}
                     ],
                     temperature=temperature,
+                    max_tokens=self.max_tokens,
                     stream=True
                 )
 

@@ -421,10 +421,11 @@ class JKReportGenerator:
 
             self.logger.info(f"开始推送周报到Notion ({display_name}): {notion_title}")
 
-            notion_result = jike_notion_client.create_report_page(
+            notion_result = jike_notion_client.create_report_page_in_hierarchy(
                 report_title=notion_title,
                 report_content=report_content,
-                report_date=beijing_time
+                report_date=beijing_time,
+                report_type='weekly'
             )
 
             if notion_result.get('success'):

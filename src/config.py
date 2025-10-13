@@ -212,6 +212,7 @@ class Config:
             'openai_api_key': openai_api_key,
             'openai_base_url': self._get_config_value('llm', 'openai_base_url', 'OPENAI_BASE_URL', 'https://api.openai.com/v1'),
             'max_content_length': self._get_config_value('llm', 'max_content_length', 'LLM_MAX_CONTENT_LENGTH', 380000, int),
+            'max_tokens': self._get_config_value('llm', 'max_tokens', 'LLM_MAX_TOKENS', 20000, int),
         }
 
     def get_fast_model_config(self) -> Dict[str, str]:
