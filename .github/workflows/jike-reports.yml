@@ -2,8 +2,8 @@ name: Jike Report Generation
 
 on:
   schedule:
-    # 北京时间 9:00、15:00、21:00 生成 24h 日报（UTC: 1,7,13）
-    - cron: '0 1,7,13 * * *'
+    # 北京时间 9:00、21:00 生成 24h 日报（UTC: 1,13）
+    - cron: '0 1,13 * * *'
     # 每周日 北京时间 08:00 生成周报（UTC: 0）
     - cron: '0 0 * * 0'
     # KOL 月报和季度叙事暂时仅支持手动触发
@@ -45,7 +45,7 @@ on:
 jobs:
   report-daily:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 1,7,13 * * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'daily_hotspot')
+    if: github.event.schedule == '0 1,13 * * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.report_type == 'daily_hotspot')
     env:
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
