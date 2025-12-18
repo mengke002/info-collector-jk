@@ -103,7 +103,22 @@ class Config:
         # 检查SSL模式
         ssl_mode = self._get_config_value('database', 'ssl_mode', 'DB_SSL_MODE', 'disabled')
         if ssl_mode.upper() == 'REQUIRED':
-            config['ssl'] = {'mode': 'REQUIRED'}
+            # PyMySQL的ssl参数需要一个字典，通常包含ca证书路径
+            config['ssl'] = {}
+            
+            # 尝试查找系统CA证书
+            # GitHub Actions (Ubuntu) 通常在 /etc/ssl/certs/ca-certificates.crt
+            possible_paths = [
+                '/etc/ssl/certs/ca-certificates.crt',  # Debian/Ubuntu
+                '/etc/pki/tls/certs/ca-bundle.crt',    # Fedora/RHEL
+                '/etc/ssl/cert.pem',                   # macOS
+                '/usr/local/etc/openssl/cert.pem',     # macOS Homebrew
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    config['ssl']['ca'] = path
+                    break
         
         # 验证必需的数据库配置
         required_fields = ['host', 'user', 'password', 'database']
