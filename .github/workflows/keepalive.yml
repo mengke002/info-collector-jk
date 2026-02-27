@@ -1,0 +1,16 @@
+name: Keepalive Workflow
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Run daily to check for inactivity
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # Required for API based keepalive
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keepalive Action
+        uses: gautamkrishnar/keepalive-workflow@v2
