@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-即刻爬虫系统
-主执行脚本
+即刻数据采集系统
 """
 import sys
 import argparse
